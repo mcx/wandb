@@ -1,18 +1,12 @@
-"""
-progress.
-"""
+"""progress."""
 
 import os
-import sys
 from typing import IO, TYPE_CHECKING, Optional
 
 from wandb.errors import CommError
 
 if TYPE_CHECKING:
-    if sys.version_info >= (3, 8):
-        from typing import Protocol
-    else:
-        from typing_extensions import Protocol
+    from typing import Protocol
 
     class ProgressFn(Protocol):
         def __call__(self, new_bytes: int, total_bytes: int) -> None:
@@ -20,7 +14,7 @@ if TYPE_CHECKING:
 
 
 class Progress:
-    """A helper class for displaying progress"""
+    """A helper class for displaying progress."""
 
     ITER_BYTES = 1024 * 1024
 
@@ -35,12 +29,12 @@ class Progress:
 
             callback = callback_
 
-        self.callback: "ProgressFn" = callback
+        self.callback: ProgressFn = callback
         self.bytes_read = 0
         self.len = os.fstat(file.fileno()).st_size
 
     def read(self, size=-1):
-        """Read bytes and call the callback"""
+        """Read bytes and call the callback."""
         bites = self.file.read(size)
         self.bytes_read += len(bites)
         if not bites and self.bytes_read < self.len:
@@ -54,7 +48,7 @@ class Progress:
                 )
             )
         # Growing files are also likely to be bad, but our code didn't break
-        # on those in the past so it's riskier to make that an error now.
+        # on those in the past, so it's riskier to make that an error now.
         self.callback(len(bites), self.bytes_read)
         return bites
 
@@ -64,7 +58,7 @@ class Progress:
         self.file.seek(0)
 
     def __getattr__(self, name):
-        """Fallback to the file object for attrs not defined here"""
+        """Fallback to the file object for attrs not defined here."""
         if hasattr(self.file, name):
             return getattr(self.file, name)
         else:

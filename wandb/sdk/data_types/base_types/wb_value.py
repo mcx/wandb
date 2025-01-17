@@ -1,30 +1,39 @@
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Type, Union
 
+import wandb
 from wandb import util
 
 if TYPE_CHECKING:  # pragma: no cover
-    from wandb.apis.public import Artifact as PublicArtifact
+    from wandb.sdk.artifacts.artifact import Artifact
 
-    from ...wandb_artifacts import Artifact as LocalArtifact
     from ...wandb_run import Run as LocalRun
 
     TypeMappingType = Dict[str, Type["WBValue"]]
 
 
 def _server_accepts_client_ids() -> bool:
-    from pkg_resources import parse_version
+    from wandb.util import parse_version
 
-    # First, if we are offline, assume the backend server cannot
-    # accept client IDs. Unfortunately, this is the best we can do
-    # until we are sure that all local versions are > "0.11.0" max_cli_version.
-    # The practical implication is that tables logged in offline mode
-    # will not show up in the workspace (but will still show up in artifacts). This
-    # means we never lose data, and we can still view using weave. If we decided
-    # to use client ids in offline mode, then the manifests and artifact data
-    # would never be resolvable and would lead to failed uploads. Our position
-    # is to never lose data - and instead take the tradeoff in the UI.
+    # There are versions of W&B Server that cannot accept client IDs. Those versions of
+    # the backend have a max_cli_version of less than "0.11.0." If the backend cannot
+    # accept client IDs, manifests and artifact data would never be resolvable and lead
+    # to failed uploads. Our position in 2021/06/29 was to never lose data - and instead take the
+    # tradeoff in the UI. The results in tables not displaying media correctly, but
+    # the table can still be accessed via the .artifact op.
+    #
+    # The latest SDK version that is < "0.11.0" was released on 2021/06/29.
+    # AS OF NOW, 2024/11/06, we assume that all customer's server deployments accept
+    # client IDs.
+
     if util._is_offline():
-        return False
+        # If there are any users with issues on an older backend, customers can disable the
+        # setting `allow_offline_artifacts` to revert the SDK's behavior back to not
+        # using client IDs in offline mode.
+        if wandb.run and not wandb.run.settings.allow_offline_artifacts:
+            return False
+        # Assume client IDs are accepted
+        else:
+            return True
 
     # If the script is online, request the max_cli_version and ensure the server
     # is of a high enough version.
@@ -36,30 +45,28 @@ def _server_accepts_client_ids() -> bool:
 
 
 class _WBValueArtifactSource:
-    artifact: "PublicArtifact"
+    artifact: "Artifact"
     name: Optional[str]
 
-    def __init__(self, artifact: "PublicArtifact", name: Optional[str] = None) -> None:
+    def __init__(self, artifact: "Artifact", name: Optional[str] = None) -> None:
         self.artifact = artifact
         self.name = name
 
 
 class _WBValueArtifactTarget:
-    artifact: "LocalArtifact"
+    artifact: "Artifact"
     name: Optional[str]
 
-    def __init__(self, artifact: "LocalArtifact", name: Optional[str] = None) -> None:
+    def __init__(self, artifact: "Artifact", name: Optional[str] = None) -> None:
         self.artifact = artifact
         self.name = name
 
 
 class WBValue:
-    """
-    Abstract parent class for things that can be logged by `wandb.log()` and
-    visualized by wandb.
+    """Typed objects that can be logged with `wandb.log()` and visualized by wandb.
 
-    The objects will be serialized as JSON and always have a _type attribute
-    that indicates how to interpret the other fields.
+    The objects will be serialized as JSON and always have a _type attribute that
+    indicates how to interpret the other fields.
     """
 
     # Class Attributes
@@ -75,12 +82,15 @@ class WBValue:
         self._artifact_source = None
         self._artifact_target = None
 
-    def to_json(self, run_or_artifact: Union["LocalRun", "LocalArtifact"]) -> dict:
-        """Serializes the object into a JSON blob, using a run or artifact to store additional data.
+    def to_json(self, run_or_artifact: Union["LocalRun", "Artifact"]) -> dict:
+        """Serialize the object into a JSON blob.
+
+        Uses current run or artifact to store additional data.
 
         Args:
-            run_or_artifact (wandb.Run | wandb.Artifact): the Run or Artifact for which this object should be generating
-            JSON for - this is useful to to store additional data if needed.
+            run_or_artifact (wandb.Run | wandb.Artifact): the Run or Artifact for which
+                this object should be generating JSON for - this is useful to to store
+                additional data if needed.
 
         Returns:
             dict: JSON representation
@@ -88,30 +98,30 @@ class WBValue:
         raise NotImplementedError
 
     @classmethod
-    def from_json(
-        cls: Type["WBValue"], json_obj: dict, source_artifact: "PublicArtifact"
-    ) -> "WBValue":
-        """Deserialize a `json_obj` into it's class representation. If additional resources were stored in the
-        `run_or_artifact` artifact during the `to_json` call, then those resources are expected to be in
-        the `source_artifact`.
+    def from_json(cls, json_obj: dict, source_artifact: "Artifact") -> "WBValue":
+        """Deserialize a `json_obj` into it's class representation.
+
+        If additional resources were stored in the `run_or_artifact` artifact during the
+        `to_json` call, then those resources should be in the `source_artifact`.
 
         Args:
-            json_obj (dict): A JSON dictionary to deserialize
-            source_artifact (wandb.Artifact): An artifact which will hold any additional resources which were stored
-            during the `to_json` function.
+            json_obj (dict): A JSON dictionary to deserialize source_artifact
+            (wandb.Artifact): An artifact which will hold any additional
+                resources which were stored during the `to_json` function.
         """
         raise NotImplementedError
 
     @classmethod
     def with_suffix(cls: Type["WBValue"], name: str, filetype: str = "json") -> str:
-        """Helper function to return the name with suffix added if not already
+        """Get the name with the appropriate suffix.
 
         Args:
             name (str): the name of the file
             filetype (str, optional): the filetype to use. Defaults to "json".
 
         Returns:
-            str: a filename which is suffixed with it's `_log_type` followed by the filetype
+            str: a filename which is suffixed with it's `_log_type` followed by the
+                filetype.
         """
         if cls._log_type is not None:
             suffix = cls._log_type + "." + filetype
@@ -123,18 +133,22 @@ class WBValue:
 
     @staticmethod
     def init_from_json(
-        json_obj: dict, source_artifact: "PublicArtifact"
+        json_obj: dict, source_artifact: "Artifact"
     ) -> Optional["WBValue"]:
-        """Looks through all subclasses and tries to match the json obj with the class which created it. It will then
-        call that subclass' `from_json` method. Importantly, this function will set the return object's `source_artifact`
-        attribute to the passed in source artifact. This is critical for artifact bookkeeping. If you choose to create
-        a wandb.Value via it's `from_json` method, make sure to properly set this `artifact_source` to avoid data duplication.
+        """Initialize a `WBValue` from a JSON blob based on the class that created it.
+
+        Looks through all subclasses and tries to match the json obj with the class
+        which created it. It will then call that subclass' `from_json` method.
+        Importantly, this function will set the return object's `source_artifact`
+        attribute to the passed in source artifact. This is critical for artifact
+        bookkeeping. If you choose to create a wandb.Value via it's `from_json` method,
+        make sure to properly set this `artifact_source` to avoid data duplication.
 
         Args:
-            json_obj (dict): A JSON dictionary to deserialize. It must contain a `_type` key. The value of
-            this key is used to lookup the correct subclass to use.
-            source_artifact (wandb.Artifact): An artifact which will hold any additional resources which were stored
-            during the `to_json` function.
+            json_obj (dict): A JSON dictionary to deserialize. It must contain a `_type`
+                key. This is used to lookup the correct subclass to use.
+            source_artifact (wandb.Artifact): An artifact which will hold any additional
+                resources which were stored during the `to_json` function.
 
         Returns:
             wandb.Value: a newly created instance of a subclass of wandb.Value
@@ -149,7 +163,7 @@ class WBValue:
 
     @staticmethod
     def type_mapping() -> "TypeMappingType":
-        """Returns a map from `_log_type` to subclass. Used to lookup correct types for deserialization.
+        """Return a map from `_log_type` to subclass. Used to lookup correct types for deserialization.
 
         Returns:
             dict: dictionary of str:class
@@ -175,11 +189,11 @@ class WBValue:
         return not self.__eq__(other)
 
     def to_data_array(self) -> List[Any]:
-        """Converts the object to a list of primitives representing the underlying data"""
+        """Convert the object to a list of primitives representing the underlying data."""
         raise NotImplementedError
 
     def _set_artifact_source(
-        self, artifact: "PublicArtifact", name: Optional[str] = None
+        self, artifact: "Artifact", name: Optional[str] = None
     ) -> None:
         assert (
             self._artifact_source is None
@@ -189,7 +203,7 @@ class WBValue:
         self._artifact_source = _WBValueArtifactSource(artifact, name)
 
     def _set_artifact_target(
-        self, artifact: "LocalArtifact", name: Optional[str] = None
+        self, artifact: "Artifact", name: Optional[str] = None
     ) -> None:
         assert (
             self._artifact_target is None
@@ -201,7 +215,7 @@ class WBValue:
     def _get_artifact_entry_ref_url(self) -> Optional[str]:
         # If the object is coming from another artifact
         if self._artifact_source and self._artifact_source.name:
-            ref_entry = self._artifact_source.artifact.get_path(
+            ref_entry = self._artifact_source.artifact.get_entry(
                 type(self).with_suffix(self._artifact_source.name)
             )
             return str(ref_entry.ref_url())
@@ -225,12 +239,12 @@ class WBValue:
         elif (
             self._artifact_target
             and self._artifact_target.name
-            and self._artifact_target.artifact._logged_artifact is not None
+            and self._artifact_target.artifact._is_draft_save_started()
             and not util._is_offline()
             and not _server_accepts_client_ids()
         ):
             self._artifact_target.artifact.wait()
-            ref_entry = self._artifact_target.artifact.get_path(
+            ref_entry = self._artifact_target.artifact.get_entry(
                 type(self).with_suffix(self._artifact_target.name)
             )
             return str(ref_entry.ref_url())
@@ -256,12 +270,12 @@ class WBValue:
         elif (
             self._artifact_target
             and self._artifact_target.name
-            and self._artifact_target.artifact._logged_artifact is not None
+            and self._artifact_target.artifact._is_draft_save_started()
             and not util._is_offline()
             and not _server_accepts_client_ids()
         ):
             self._artifact_target.artifact.wait()
-            ref_entry = self._artifact_target.artifact.get_path(
+            ref_entry = self._artifact_target.artifact.get_entry(
                 type(self).with_suffix(self._artifact_target.name)
             )
             return str(ref_entry.ref_url())

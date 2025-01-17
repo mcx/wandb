@@ -13,11 +13,10 @@ def isfinite(f):
 
 
 def sparkify(series: List[Union[float, int]]) -> str:
-    """Converts <series> to a sparkline string.
+    """Convert <series> to a sparkline string.
 
     Example:
-    >>> sparkify([ 0.5, 1.2, 3.5, 7.3, 8.0, 12.5, 13.2, 15.0, 14.2, 11.8, 6.1,
-    ... 1.9 ])
+    >>> sparkify([0.5, 1.2, 3.5, 7.3, 8.0, 12.5, 13.2, 15.0, 14.2, 11.8, 6.1, 1.9])
     u'▁▁▂▄▅▇▇██▆▄▂'
 
     >>> sparkify([1, 1, -2, 3, -5, 8, -13])

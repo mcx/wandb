@@ -1,22 +1,17 @@
 """Use wandb to track machine learning work.
 
-The most commonly used functions/objects are:
-  - wandb.init — initialize a new run at the top of your training script
-  - wandb.config — track hyperparameters and metadata
-  - wandb.log — log metrics and media over time within your training loop
+Train and fine-tune models, manage models from experimentation to production.
 
-For guides and examples, see https://docs.wandb.com/guides.
+For guides and examples, see https://docs.wandb.ai.
 
 For scripts and interactive notebooks, see https://github.com/wandb/examples.
 
 For reference documentation, see https://docs.wandb.com/ref/python.
 """
-__version__ = "0.13.10.dev1"
+from __future__ import annotations
 
-# Used with pypi checks and other messages related to pip
-_wandb_module = "wandb"
+__version__ = "0.19.5.dev1"
 
-from typing import Optional
 
 from wandb.errors import Error
 
@@ -27,15 +22,13 @@ from wandb import sdk as wandb_sdk
 
 import wandb
 
-wandb.wandb_lib = wandb_sdk.lib
+wandb.wandb_lib = wandb_sdk.lib  # type: ignore
 
 init = wandb_sdk.init
 setup = wandb_sdk.setup
 _attach = wandb_sdk._attach
+_sync = wandb_sdk._sync
 _teardown = wandb_sdk.teardown
-save = wandb_sdk.save
-watch = wandb_sdk.watch
-unwatch = wandb_sdk.unwatch
 finish = wandb_sdk.finish
 join = finish
 login = wandb_sdk.login
@@ -51,15 +44,19 @@ Config = wandb_sdk.Config
 from wandb.apis import InternalApi, PublicApi
 from wandb.errors import CommError, UsageError
 
-_preinit = wandb.wandb_lib.preinit
-_lazyloader = wandb.wandb_lib.lazyloader
+_preinit = wandb.wandb_lib.preinit  # type: ignore
+_lazyloader = wandb.wandb_lib.lazyloader  # type: ignore
 
 # Call import module hook to set up any needed require hooks
 wandb.sdk.wandb_require._import_module_hook()
 
-from wandb import wandb_torch
+from wandb.integration.torch import wandb_torch
 
 # Move this (keras.__init__ expects it at top level)
+from wandb.sdk.data_types._private import _cleanup_media_tmp_dir
+
+_cleanup_media_tmp_dir()
+
 from wandb.data_types import Graph
 from wandb.data_types import Image
 from wandb.data_types import Plotly
@@ -69,6 +66,7 @@ from wandb.data_types import Video
 from wandb.data_types import Audio
 from wandb.data_types import Table
 from wandb.data_types import Html
+from wandb.data_types import box3d
 from wandb.data_types import Object3D
 from wandb.data_types import Molecule
 from wandb.data_types import Histogram
@@ -77,13 +75,12 @@ from wandb.data_types import JoinedTable
 
 from wandb.wandb_agent import agent
 
-# from wandb.core import *
-from wandb.viz import visualize
-from wandb import plot
-from wandb import plots  # deprecating this
+from wandb.plot import visualize, plot_table
 from wandb.integration.sagemaker import sagemaker_auth
 from wandb.sdk.internal import profiler
 
+# Artifact import types
+from wandb.sdk.artifacts.artifact_ttl import ArtifactTTL
 
 # Used to make sure we don't use some code in the incorrect process context
 _IS_INTERNAL_PROCESS = False
@@ -111,43 +108,44 @@ def _assert_is_user_process():
     assert not _IS_INTERNAL_PROCESS
 
 
-# toplevel:
-# save()
-# restore()
-# login()
-# sweep()
-# agent()
-
 # globals
 Api = PublicApi
 api = InternalApi()
-run: Optional["wandb_sdk.wandb_run.Run"] = None
+run: wandb_sdk.wandb_run.Run | None = None
 config = _preinit.PreInitObject("wandb.config", wandb_sdk.wandb_config.Config)
 summary = _preinit.PreInitObject("wandb.summary", wandb_sdk.wandb_summary.Summary)
-log = _preinit.PreInitCallable("wandb.log", wandb_sdk.wandb_run.Run.log)
-save = _preinit.PreInitCallable("wandb.save", wandb_sdk.wandb_run.Run.save)
+log = _preinit.PreInitCallable("wandb.log", wandb_sdk.wandb_run.Run.log)  # type: ignore
+watch = _preinit.PreInitCallable("wandb.watch", wandb_sdk.wandb_run.Run.watch)  # type: ignore
+unwatch = _preinit.PreInitCallable("wandb.unwatch", wandb_sdk.wandb_run.Run.unwatch)  # type: ignore
+save = _preinit.PreInitCallable("wandb.save", wandb_sdk.wandb_run.Run.save)  # type: ignore
 restore = wandb_sdk.wandb_run.restore
 use_artifact = _preinit.PreInitCallable(
-    "wandb.use_artifact", wandb_sdk.wandb_run.Run.use_artifact
+    "wandb.use_artifact", wandb_sdk.wandb_run.Run.use_artifact  # type: ignore
 )
 log_artifact = _preinit.PreInitCallable(
-    "wandb.log_artifact", wandb_sdk.wandb_run.Run.log_artifact
+    "wandb.log_artifact", wandb_sdk.wandb_run.Run.log_artifact  # type: ignore
+)
+log_model = _preinit.PreInitCallable(
+    "wandb.log_model", wandb_sdk.wandb_run.Run.log_model  # type: ignore
+)
+use_model = _preinit.PreInitCallable(
+    "wandb.use_model", wandb_sdk.wandb_run.Run.use_model  # type: ignore
+)
+link_model = _preinit.PreInitCallable(
+    "wandb.link_model", wandb_sdk.wandb_run.Run.link_model  # type: ignore
 )
 define_metric = _preinit.PreInitCallable(
-    "wandb.define_metric", wandb_sdk.wandb_run.Run.define_metric
+    "wandb.define_metric", wandb_sdk.wandb_run.Run.define_metric  # type: ignore
 )
 
 mark_preempting = _preinit.PreInitCallable(
-    "wandb.mark_preempting", wandb_sdk.wandb_run.Run.mark_preempting
+    "wandb.mark_preempting", wandb_sdk.wandb_run.Run.mark_preempting  # type: ignore
 )
 
-plot_table = _preinit.PreInitCallable(
-    "wandb.plot_table", wandb_sdk.wandb_run.Run.plot_table
-)
-alert = _preinit.PreInitCallable("wandb.alert", wandb_sdk.wandb_run.Run.alert)
+alert = _preinit.PreInitCallable("wandb.alert", wandb_sdk.wandb_run.Run.alert)  # type: ignore
 
 # record of patched libraries
-patched = {"tensorboard": [], "keras": [], "gym": []}
+patched = {"tensorboard": [], "keras": [], "gym": []}  # type: ignore
 
 keras = _lazyloader.LazyLoader("wandb.keras", globals(), "wandb.integration.keras")
 sklearn = _lazyloader.LazyLoader("wandb.sklearn", globals(), "wandb.sklearn")
@@ -188,16 +186,32 @@ def load_ipython_extension(ipython):
     ipython.register_magics(wandb.jupyter.WandBMagics)
 
 
-if wandb_sdk.lib.ipython.in_jupyter():
-    from IPython import get_ipython
+if wandb_sdk.lib.ipython.in_notebook():
+    from IPython import get_ipython  # type: ignore[import-not-found]
 
     load_ipython_extension(get_ipython())
 
-wandb.require("service")
 
-__all__ = [
+from .analytics import Sentry as _Sentry
+
+if "dev" in __version__:
+    import wandb.env
+    import os
+
+    # Disable error reporting in dev versions.
+    os.environ[wandb.env.ERROR_REPORTING] = os.environ.get(
+        wandb.env.ERROR_REPORTING,
+        "false",
+    )
+
+_sentry = _Sentry()
+_sentry.setup()
+
+
+__all__ = (
     "__version__",
     "init",
+    "finish",
     "setup",
     "save",
     "sweep",
@@ -215,7 +229,18 @@ __all__ = [
     "Audio",
     "Table",
     "Html",
+    "box3d",
     "Object3D",
     "Molecule",
     "Histogram",
-]
+    "ArtifactTTL",
+    "log_artifact",
+    "use_artifact",
+    "log_model",
+    "use_model",
+    "link_model",
+    "define_metric",
+    "watch",
+    "unwatch",
+    "plot_table",
+)

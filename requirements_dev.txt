@@ -1,70 +1,79 @@
-pytest
+-r requirements_test.txt
+
+astunparse; python_version < '3.9'
+
+click~=8.1
+filelock~=3.13
+pydantic~=2.9
+# For Pydantic to work with modern type annotations in older Pythons:
+eval-type-backport~=0.2.0; python_version >= '3.8' and python_version < '3.10'
+
 hypothesis
-coverage
+hypothesis-fspaths
+
 Pillow
 pandas
-matplotlib!=3.5.2
-soundfile; sys_platform != 'darwin' or (sys_platform == 'darwin' and platform.machine != 'arm64')
-git+https://github.com/bastibe/python-soundfile@0.11.0b3#egg=soundfile; sys_platform == 'darwin' and platform.machine == 'arm64'
-boto3
-google-cloud-storage
-google-cloud-aiplatform
-kubernetes
+polars
 moviepy
-imageio
-ipython
-ipykernel
-nbclient
-scikit-learn
-tensorflow>=1.15.2; sys_platform != 'darwin'
-tensorflow>=1.15.2; python_version > '3.6' and sys_platform == 'darwin' and platform.machine != 'arm64'
-tensorflow-macos; python_version > '3.6' and python_version < '3.10' and sys_platform == 'darwin' and platform.machine == 'arm64'
-torch
-torchvision
+imageio[ffmpeg]
+matplotlib
+soundfile
+rdkit
 plotly
 bokeh
+
 tqdm
-docker
-stable_baselines3
-tensorboard
-gym
-jax[cpu]; sys_platform == 'darwin' or sys_platform == 'linux'
-fastcore; python_version > '3.6'
-fastcore==1.3.29; python_version == '3.6'
+
+ipython
+ipython<8.13; python_version < '3.9'
+ipykernel
+nbclient
+
+
+tensorflow~=2.18.0; python_version >= '3.9'
+
+tensorflow==2.9.2; python_version < '3.9' and sys_platform != 'darwin'
+# tensorflow==2.9.2 does not provide arm64 wheels for macOS.
+# This was fixed in later versions of tensorflow.
+tensorflow-macos==2.9.2; python_version < '3.9' and sys_platform == 'darwin'
+
+# This is a transitive dependency of `tensorflow` via `tensorboard`
+# which fails to specify an upper bound causing import errors.
+protobuf==3.19.6; python_version < '3.9' and sys_platform == 'darwin'
+
+
+scikit-learn
+torch
+torchvision
+jax[cpu]
+lightning
+ray[air,tune]
+
+fastcore
 pyarrow
-metaflow>=2.3.5
+metaflow
 xgboost
 lightgbm
-rdkit-pypi; sys_platform != 'darwin' or (sys_platform == 'darwin' and platform.machine != 'arm64')
-rdkit-pypi; python_version > '3.7' and sys_platform == 'darwin' and platform.machine == 'arm64'
+mlflow
+urllib3
+docker
+catboost
+openai
+gymnasium < 1.0.0
+stable_baselines3
 
-# TODO: fix extra dependencies
-#   We need to improve how we do requirements_dev as specifying .[extra] creates
-#   dependencies which are not resolveable by pip when dealing with yea-wandb which also requires wandb.
-#   These issues might be temporary as we transition to a released version of wandb which has
-#   the necessary support for yea-wandb (namely the relay server).
-#   Writing out explicit dependencies here is undesireable as it can get out of sync with setup.py deps.
-# .[launch]
-# vvvvvvvvvv - below are for extra launch
-nbconvert
-nbformat
-chardet
-iso8601
-typing_extensions
-boto3
-botocore
-google-cloud-storage
-kubernetes
-# ^^^^^^^^^^ - above are for extra launch
-# .[sweeps]; sys_platform != 'darwin' or (sys_platform == 'darwin' and platform.machine != 'arm64')
-# vvvvvvvvvv - below are for extra sweeps
-sweeps>=0.2.0; sys_platform != 'darwin' or (sys_platform == 'darwin' and platform.machine != 'arm64')
-# ^^^^^^^^^^ - above are for extra sweeps
-# .[azure]
-# vvvvvvvvvv - below are for extra azure
-azure-storage-blob
-# ^^^^^^^^^^ - above are for extra azure
-
-cloudpickle
+requests~=2.23
 responses
-kfp
+prometheus_client
+google-cloud-aiplatform
+
+# See:
+# - https://github.com/boto/botocore/pull/1107
+# - https://github.com/boto/botocore/pull/1230
+boto3
+botocore>=1.5.76
+
+.[perf]
+.[launch]
+.[sweeps] ; sys_platform != 'darwin' or (sys_platform == 'darwin' and platform.machine != 'arm64')
+.[azure]

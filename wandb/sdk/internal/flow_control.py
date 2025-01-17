@@ -82,14 +82,13 @@ class FlowControl:
         _threshold_bytes_mid: int = 0,
         _threshold_bytes_low: int = 0,
     ) -> None:
-
         # thresholds to define when to PAUSE, RESTART, FORWARDING
         if (
             _threshold_bytes_high == 0
             or _threshold_bytes_mid == 0
             or _threshold_bytes_low == 0
         ):
-            threshold = settings._network_buffer or DEFAULT_THRESHOLD
+            threshold = settings.x_network_buffer or DEFAULT_THRESHOLD
             _threshold_bytes_high = threshold
             _threshold_bytes_mid = threshold // 2
             _threshold_bytes_low = threshold // 4
@@ -164,7 +163,7 @@ class StateShared:
         if not request_type:
             return
         process_str = f"_process_{request_type}"
-        process_handler: Optional[Callable[["pb.Record"], None]] = getattr(
+        process_handler: Optional[Callable[[pb.Record], None]] = getattr(
             self, process_str, None
         )
         if not process_handler:

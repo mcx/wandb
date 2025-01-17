@@ -1,27 +1,138 @@
 # Install pre-commit hooks via `pip install pre-commit && pre-commit install`
 
+# Exclude:
+#   * vendored code
+#   * generated protobuf files
+exclude: '^(wandb/vendor|core/vendor/)|\.pb\.go$|_pb2\.pyi?$'
+
+default_stages:
+  - pre-push
+default_install_hook_types: [pre-push, pre-commit]
 repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: "v0.8.2"
+    hooks:
+      - id: ruff
+        args: [ --fix]
+      - id: ruff-format
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v19.1.5
+    hooks:
+      - id: clang-format
+        types_or: [proto]
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.2.0
+    rev: v5.0.0
     hooks:
-      - id: check-yaml
-      - id: end-of-file-fixer
+      - id: check-merge-conflict
       - id: trailing-whitespace
-#  - repo: https://github.com/pycqa/isort
-#    rev: 5.10.1
-#    hooks:
-#      - id: isort
-#        args: [--resolve-all-config]
-  - repo: https://github.com/psf/black
-    rev: 22.3.0
+        name: trailing-whitespace
+        exclude: ^(wandb/|tests/|src/|.bumpversion.*.cfg)
+      - id: end-of-file-fixer
+        name: end-of-file-fixer
+        exclude: ^(wandb/|tests/|src/|.*_durations)
+      - id: check-yaml
+        name: check-yaml
+        exclude: ^(wandb/|tests/)
+      - id: check-added-large-files
+        name: check-added-large-files
+      - id: check-shebang-scripts-are-executable
+        name: check-shebang-scripts-are-executable
+        exclude: ^(wandb/|tests/|landfill/)
+      - id: check-executables-have-shebangs
+        name: check-executables-have-shebangs
+        exclude: ^(wandb/|tests/|landfill/)
+      - id: check-symlinks
+        name: check-symlinks
+      - id: check-toml
+        name: check-toml
+      - id: debug-statements
+        name: debug-statements
+        exclude: ^wandb/__init__.py
+      - id: forbid-submodules
+        name: forbid-submodules
+  - repo: local
     hooks:
-      - id: black
-  - repo: https://github.com/asottile/pyupgrade
-    rev: v2.31.1
-    hooks:
-      - id: pyupgrade
-        args: [--py36-plus, --keep-mock]
-  - repo: https://github.com/asottile/blacken-docs
-    rev: v1.12.1
-    hooks:
-      - id: blacken-docs
+      - id: generate-stubs
+        name: 'generate-stubs'
+        entry: python tools/generate_stubs.py
+        language: 'system'
+        pass_filenames: false
+        always_run: true
+        description: "Generates stubs for wandb module"
+      - id: go-generate-proto
+        name: 'go-generate-proto'
+        entry: core/scripts/pre-commit-hooks/run-go-generate.sh
+        files: '\.proto$'
+        args:
+          - ./api/proto
+        pass_filenames: false
+        language: 'script'
+        description: "Runs `go generate`, requires golang"
+      - id: go-generate-graphql
+        name: 'go-generate-graphql'
+        entry: core/scripts/pre-commit-hooks/run-go-generate.sh
+        files: '\.graphql$'
+        args:
+          - ./api/graphql
+        pass_filenames: false
+        language: 'script'
+        description: "Runs `go generate`, requires golang"
+      - id: go-fmt
+        name: 'go-fmt'
+        entry: core/scripts/pre-commit-hooks/run-go-fmt.sh
+        files: '\.go$'
+        language: 'script'
+        description: "Runs `gofmt`, requires golang"
+      - id: go-imports
+        name: 'go-imports'
+        entry: core/scripts/pre-commit-hooks/run-go-imports.sh
+        files: '\.go$'
+        language: 'script'
+        description: "Runs `goimports`, requires golang"
+      - id: go-unit-tests
+        name: 'go-unit-tests'
+        entry: core/scripts/pre-commit-hooks/run-go-unit-tests.sh
+        files: '\.go$'
+        language: 'script'
+        description: "Runs `go test`"
+        require_serial: true
+      - id: go-vet
+        name: 'go-vet'
+        entry: core/scripts/pre-commit-hooks/run-go-vet.sh
+        files: '\.go$'
+        language: 'script'
+        description: "Runs `go vet`, requires golang"
+        require_serial: true
+      - id: golangci-lint
+        name: 'golangci-lint'
+        entry: core/scripts/pre-commit-hooks/run-golangci-lint.sh
+        types: [go]
+        language: 'script'
+        pass_filenames: false
+      - id: go-critic
+        name: 'go-critic'
+        entry: core/scripts/pre-commit-hooks/run-go-critic.sh
+        files: '\.go$'
+        language: 'script'
+        pass_filenames: false
+        description: "Runs `go-critic`, requires https://github.com/go-critic/go-critic"
+      - id: go-cyclo
+        name: 'go-cyclo'
+        entry: core/scripts/pre-commit-hooks/run-go-cyclo.sh
+        files: '\.go$'
+        language: 'script'
+        description: "Runs `gocyclo`, requires https://github.com/fzipp/gocyclo"
+        args:
+          - -over=21
+      - id: go-mod-tidy
+        name: 'go-mod-tidy'
+        entry: core/scripts/pre-commit-hooks/run-go-mod-tidy.sh
+        pass_filenames: false
+        language: 'script'
+        description: "Runs `go mod tidy -v`, requires golang"
+      - id: go-build
+        name: 'go-build'
+        entry: core/scripts/pre-commit-hooks/run-go-build.sh
+        files: '\.go$'
+        language: 'script'
+        description: "Runs `go build`, requires golang"

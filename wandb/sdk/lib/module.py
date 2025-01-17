@@ -14,8 +14,12 @@ def set_global(
     log_artifact=None,
     define_metric=None,
     alert=None,
-    plot_table=None,
     mark_preempting=None,
+    log_model=None,
+    use_model=None,
+    link_model=None,
+    watch=None,
+    unwatch=None,
 ):
     if run:
         wandb.run = run
@@ -33,12 +37,20 @@ def set_global(
         wandb.log_artifact = log_artifact
     if define_metric:
         wandb.define_metric = define_metric
-    if plot_table:
-        wandb.plot_table = plot_table
     if alert:
         wandb.alert = alert
     if mark_preempting:
         wandb.mark_preempting = mark_preempting
+    if log_model:
+        wandb.log_model = log_model
+    if use_model:
+        wandb.use_model = use_model
+    if link_model:
+        wandb.link_model = link_model
+    if watch:
+        wandb.watch = watch
+    if unwatch:
+        wandb.unwatch = unwatch
 
 
 def unset_globals():
@@ -46,6 +58,12 @@ def unset_globals():
     wandb.config = preinit.PreInitObject("wandb.config")
     wandb.summary = preinit.PreInitObject("wandb.summary")
     wandb.log = preinit.PreInitCallable("wandb.log", wandb.wandb_sdk.wandb_run.Run.log)
+    wandb.watch = preinit.PreInitCallable(
+        "wandb.watch", wandb.wandb_sdk.wandb_run.Run.watch
+    )
+    wandb.unwatch = preinit.PreInitCallable(
+        "wandb.unwatch", wandb.wandb_sdk.wandb_run.Run.unwatch
+    )
     wandb.save = preinit.PreInitCallable(
         "wandb.save", wandb.wandb_sdk.wandb_run.Run.save
     )

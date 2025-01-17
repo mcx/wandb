@@ -1,29 +1,27 @@
-"""
-Utilities for wandb verify
-"""
+"""Utilities for wandb verify."""
+
 import getpass
 import os
 import time
 from functools import partial
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import click
 import requests
-from pkg_resources import parse_version
-from wandb_gql import gql  # type: ignore
+from wandb_gql import gql
 
 import wandb
+from wandb.sdk.artifacts.artifact import Artifact
 from wandb.sdk.lib import runid
 
 from ...apis.internal import Api
-from ...apis.public import Artifact as ArtifactAPI
-from ..wandb_artifacts import Artifact
 
 PROJECT_NAME = "verify"
 GET_RUN_MAX_TIME = 10
 MIN_RETRYS = 3
 CHECKMARK = "\u2705"
-RED_X = "\u274C"
+RED_X = "\u274c"
 ID_PREFIX = runid.generate_id()
 
 
@@ -39,17 +37,17 @@ def print_results(
     else:
         color = "red"
     if isinstance(failed_test_or_tests, str):
-        print(RED_X)
-        print(click.style(failed_test_or_tests, fg=color, bold=True))
+        print(RED_X)  # noqa: T201
+        print(click.style(failed_test_or_tests, fg=color, bold=True))  # noqa: T201
     elif isinstance(failed_test_or_tests, list) and len(failed_test_or_tests) > 0:
-        print(RED_X)
-        print(
+        print(RED_X)  # noqa: T201
+        print(  # noqa: T201
             "\n".join(
                 [click.style(f, fg=color, bold=True) for f in failed_test_or_tests]
             )
         )
     else:
-        print(CHECKMARK)
+        print(CHECKMARK)  # noqa: T201
 
 
 def check_host(host: str) -> bool:
@@ -60,7 +58,7 @@ def check_host(host: str) -> bool:
 
 
 def check_logged_in(api: Api, host: str) -> bool:
-    print("Checking if logged in".ljust(72, "."), end="")
+    print("Checking if logged in".ljust(72, "."), end="")  # noqa: T201
     login_doc_url = "https://docs.wandb.ai/ref/cli/wandb-login"
     fail_string = None
     if api.api_key is None:
@@ -85,7 +83,7 @@ def check_logged_in(api: Api, host: str) -> bool:
 
 def check_secure_requests(url: str, test_url_string: str, failure_output: str) -> None:
     # check if request is over https
-    print(test_url_string.ljust(72, "."), end="")
+    print(test_url_string.ljust(72, "."), end="")  # noqa: T201
     fail_string = None
     if not url.startswith("https"):
         fail_string = failure_output
@@ -93,7 +91,7 @@ def check_secure_requests(url: str, test_url_string: str, failure_output: str) -
 
 
 def check_cors_configuration(url: str, origin: str) -> None:
-    print("Checking CORs configuration of the bucket".ljust(72, "."), end="")
+    print("Checking CORs configuration of the bucket".ljust(72, "."), end="")  # noqa: T201
     fail_string = None
     res_get = requests.options(
         url, headers={"Origin": origin, "Access-Control-Request-Method": "GET"}
@@ -109,7 +107,7 @@ def check_cors_configuration(url: str, origin: str) -> None:
 
 
 def check_run(api: Api) -> bool:
-    print(
+    print(  # noqa: T201
         "Checking logged metrics, saving and downloading a file".ljust(72, "."), end=""
     )
     failed_test_strings = []
@@ -225,7 +223,7 @@ def verify_manifest(
 
 
 def verify_digest(
-    downloaded: "ArtifactAPI", computed: "ArtifactAPI", fails_list: List[str]
+    downloaded: "Artifact", computed: "Artifact", fails_list: List[str]
 ) -> None:
     if downloaded.digest != computed.digest:
         fails_list.append(
@@ -253,11 +251,11 @@ def artifact_with_path_or_paths(
     with open(f"{verify_dir}/verify_1.txt", "w") as f:
         f.write("1")
     art.add_dir(verify_dir)
-    with open("verify_3.txt", "w") as f:
-        f.write("3")
+    file3 = Path(verify_dir) / "verify_3.txt"
+    file3.write_text("3")
 
     # reference to local file
-    art.add_reference("file://verify_3.txt")
+    art.add_reference(file3.resolve().as_uri())
 
     return art
 
@@ -269,14 +267,13 @@ def log_use_download_artifact(
     download_dir: str,
     failed_test_strings: List[str],
     add_extra_file: bool,
-) -> Tuple[bool, Optional["ArtifactAPI"], List[str]]:
+) -> Tuple[bool, Optional["Artifact"], List[str]]:
     with wandb.init(
         id=nice_id("log_artifact"),
         reinit=True,
         project=PROJECT_NAME,
         config={"test": "artifact log"},
     ) as log_art_run:
-
         if add_extra_file:
             with open("verify_2.txt", "w") as f:
                 f.write("2")
@@ -311,13 +308,13 @@ def log_use_download_artifact(
 
 
 def check_artifacts() -> bool:
-    print("Checking artifact save and download workflows".ljust(72, "."), end="")
+    print("Checking artifact save and download workflows".ljust(72, "."), end="")  # noqa: T201
     failed_test_strings: List[str] = []
 
     # test checksum
     sing_art_dir = "./verify_sing_art"
     alias = "sing_art1"
-    name = "sing-artys"
+    name = nice_id("sing-artys")
     singular_art = artifact_with_path_or_paths(name, singular=True)
     cont_test, download_artifact, failed_test_strings = log_use_download_artifact(
         singular_art, alias, name, sing_art_dir, failed_test_strings, False
@@ -335,7 +332,7 @@ def check_artifacts() -> bool:
     # test manifest and digest
     multi_art_dir = "./verify_art"
     alias = "art1"
-    name = "my-artys"
+    name = nice_id("my-artys")
     art1 = artifact_with_path_or_paths(name, "./verify_art_dir", singular=False)
     cont_test, download_artifact, failed_test_strings = log_use_download_artifact(
         art1, alias, name, multi_art_dir, failed_test_strings, True
@@ -359,9 +356,7 @@ def check_artifacts() -> bool:
     verify_digest(download_artifact, computed, failed_test_strings)
 
     computed_manifest = computed.manifest.to_manifest_json()["contents"]
-    downloaded_manifest = download_artifact._load_manifest().to_manifest_json()[
-        "contents"
-    ]
+    downloaded_manifest = download_artifact.manifest.to_manifest_json()["contents"]
     verify_manifest(downloaded_manifest, computed_manifest, failed_test_strings)
 
     print_results(failed_test_strings, False)
@@ -370,7 +365,7 @@ def check_artifacts() -> bool:
 
 def check_graphql_put(api: Api, host: str) -> Tuple[bool, Optional[str]]:
     # check graphql endpoint using an upload
-    print("Checking signed URL upload".ljust(72, "."), end="")
+    print("Checking signed URL upload".ljust(72, "."), end="")  # noqa: T201
     failed_test_strings = []
     gql_fp = "gql_test_file.txt"
     f = open(gql_fp, "w")
@@ -415,7 +410,7 @@ def check_graphql_put(api: Api, host: str) -> Tuple[bool, Optional[str]]:
 
 
 def check_large_post() -> bool:
-    print(
+    print(  # noqa: T201
         "Checking ability to send large payloads through proxy".ljust(72, "."), end=""
     )
     descy = "a" * int(10**7)
@@ -449,7 +444,11 @@ def check_large_post() -> bool:
             timeout=60,
         )
     except Exception as e:
-        if isinstance(e, requests.HTTPError) and e.response.status_code == 413:
+        if (
+            isinstance(e, requests.HTTPError)
+            and e.response is not None
+            and e.response.status_code == 413
+        ):
             failed_test_strings.append(
                 'Failed to send a large payload. Check nginx.ingress.kubernetes.io/proxy-body-size is "0".'
             )
@@ -462,7 +461,7 @@ def check_large_post() -> bool:
 
 
 def check_wandb_version(api: Api) -> None:
-    print("Checking wandb package version is up to date".ljust(72, "."), end="")
+    print("Checking wandb package version is up to date".ljust(72, "."), end="")  # noqa: T201
     _, server_info = api.viewer_server_info()
     fail_string = None
     warning = False
@@ -470,6 +469,8 @@ def check_wandb_version(api: Api) -> None:
     min_cli_version = server_info.get("cliVersionInfo", {}).get(
         "min_cli_version", "0.0.1"
     )
+    from wandb.util import parse_version
+
     if parse_version(wandb.__version__) < parse_version(min_cli_version):
         fail_string = "wandb version out of date, please run pip install --upgrade wandb=={}".format(
             max_cli_version

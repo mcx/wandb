@@ -21,8 +21,10 @@ from typing import (
     cast,
 )
 
+from wandb.errors.links import url_registry
 from wandb.proto.wandb_internal_pb2 import (
     HistoryRecord,
+    InternalMessages,
     MetricRecord,
     Record,
     Result,
@@ -31,21 +33,36 @@ from wandb.proto.wandb_internal_pb2 import (
     SummaryItem,
     SummaryRecord,
     SummaryRecordRequest,
+    SystemMetricSample,
+    SystemMetricsBuffer,
 )
 
 from ..interface.interface_queue import InterfaceQueue
-from ..lib import handler_util, proto_util, tracelog
+from ..lib import handler_util, proto_util
+from ..wandb_metadata import Metadata
 from . import context, sample, tb_watcher
 from .settings_static import SettingsStatic
 from .system.system_monitor import SystemMonitor
 
 if TYPE_CHECKING:
-    from wandb.proto.wandb_internal_pb2 import ArtifactDoneRequest, MetricSummary
+    from wandb.proto.wandb_internal_pb2 import MetricSummary
 
 
 SummaryDict = Dict[str, Any]
 
 logger = logging.getLogger(__name__)
+
+# Update (March 5, 2024): Since ~2020/2021, when constructing the summary
+# object, we had replaced the artifact path for media types with the latest
+# artifact path. The primary purpose of this was to support live updating of
+# media objects in the UI (since the default artifact path was fully qualified
+# and would not update). However, in March of 2024, a bug was discovered with
+# this approach which causes this path to be incorrect in cases where the media
+# object is logged to another artifact before being logged to the run. Setting
+# this to `False` disables this copy behavior. The impact is that users will
+# need to refresh to see updates. Ironically, this updating behavior is not
+# currently supported in the UI, so the impact of this change is minimal.
+REPLACE_SUMMARY_ART_PATH_WITH_LATEST = False
 
 
 def _dict_nested_set(target: Dict[str, Any], key_list: Sequence[str], v: Any) -> None:
@@ -80,7 +97,6 @@ class HandleManager:
     _metric_copy: Dict[Tuple[str, ...], Any]
     _track_time: Optional[float]
     _accumulate_time: float
-    _artifact_xid_done: Dict[str, "ArtifactDoneRequest"]
     _run_start_time: Optional[float]
     _context_keeper: context.ContextKeeper
 
@@ -104,6 +120,7 @@ class HandleManager:
 
         self._tb_watcher = None
         self._system_monitor = None
+        self._metadata: Optional[Metadata] = None
         self._step = 0
 
         self._track_time = None
@@ -119,9 +136,9 @@ class HandleManager:
         self._metric_globs = defaultdict(MetricRecord)
         self._metric_track = dict()
         self._metric_copy = dict()
+        self._internal_messages = InternalMessages()
 
-        # TODO: implement release protocol to clean this up
-        self._artifact_xid_done = dict()
+        self._dropped_history = False
 
     def __len__(self) -> int:
         return self._record_q.qsize()
@@ -148,11 +165,9 @@ class HandleManager:
     def _dispatch_record(self, record: Record, always_send: bool = False) -> None:
         if always_send:
             record.control.always_send = True
-        tracelog.log_message_queue(record, self._writer_q)
         self._writer_q.put(record)
 
     def _respond_result(self, result: Result) -> None:
-        tracelog.log_message_queue(result, self._result_q)
         context_id = context.context_id_from_result(result)
         self._context_keeper.release(context_id)
         self._result_q.put(result)
@@ -162,6 +177,9 @@ class HandleManager:
 
     def handle_request_cancel(self, record: Record) -> None:
         self._dispatch_record(record)
+
+    def handle_request_metadata(self, record: Record) -> None:
+        logger.warning("Metadata updates are ignored when using the legacy service.")
 
     def handle_request_defer(self, record: Record) -> None:
         defer = record.request.defer
@@ -190,7 +208,15 @@ class HandleManager:
     def handle_request_login(self, record: Record) -> None:
         self._dispatch_record(record)
 
+    def handle_request_python_packages(self, record: Record) -> None:
+        self._dispatch_record(record)
+
     def handle_run(self, record: Record) -> None:
+        if self._settings._offline:
+            self._run_proto = record.run
+            result = proto_util._result_from_record(record)
+            result.run_result.run.CopyFrom(record.run)
+            self._respond_result(result)
         self._dispatch_record(record)
 
     def handle_stats(self, record: Record) -> None:
@@ -208,7 +234,7 @@ class HandleManager:
     def handle_files(self, record: Record) -> None:
         self._dispatch_record(record)
 
-    def handle_link_artifact(self, record: Record) -> None:
+    def handle_request_link_artifact(self, record: Record) -> None:
         self._dispatch_record(record)
 
     def handle_use_artifact(self, record: Record) -> None:
@@ -230,7 +256,7 @@ class HandleManager:
             record = Record(summary=summary)
             self._dispatch_record(record)
         elif not self._settings._offline:
-            # Send this summary update as a request since we arent persisting every update
+            # Send this summary update as a request since we aren't persisting every update
             summary_record = SummaryRecordRequest(summary=summary)
             request_record = self._interface._make_request(
                 summary_record=summary_record
@@ -261,7 +287,7 @@ class HandleManager:
         if s.none:
             return False
         if s.copy:
-            # non key list copy already done in _update_summary
+            # non-key list copy already done in _update_summary
             if len(kl) > 1:
                 _dict_nested_set(self._consolidated_summary, kl, v)
                 return True
@@ -285,7 +311,7 @@ class HandleManager:
                 if best_key:
                     _dict_nested_set(self._consolidated_summary, best_key, v)
                     updated = True
-        # defaulting to minimize if goal is not supecified
+        # defaulting to minimize if goal is not specified
         if s.min or best_key and not goal_max:
             min_key = tuple(kl + ["min"])
             old_min = self._metric_track.get(min_key)
@@ -353,7 +379,7 @@ class HandleManager:
     ) -> bool:
         metric_key = ".".join([k.replace(".", "\\.") for k in kl])
         d = self._metric_defines.get(metric_key, d)
-        # if the dict has _type key, its a wandb table object
+        # if the dict has _type key, it's a wandb table object
         if isinstance(v, dict) and not handler_util.metric_is_wandb_dict(v):
             updated = False
             for nk, nv in v.items():
@@ -361,7 +387,11 @@ class HandleManager:
                     updated = True
             return updated
         # If the dict is a media object, update the pointer to the latest alias
-        elif isinstance(v, dict) and handler_util.metric_is_wandb_dict(v):
+        elif (
+            REPLACE_SUMMARY_ART_PATH_WITH_LATEST
+            and isinstance(v, dict)
+            and handler_util.metric_is_wandb_dict(v)
+        ):
             if "_latest_artifact_path" in v and "artifact_path" in v:
                 # TODO: Make non-destructive?
                 v["artifact_path"] = v["_latest_artifact_path"]
@@ -369,9 +399,9 @@ class HandleManager:
         return updated
 
     def _update_summary_media_objects(self, v: Dict[str, Any]) -> Dict[str, Any]:
-        # For now, non recursive - just top level
+        # For now, non-recursive - just top level
         for nk, nv in v.items():
-            if (
+            if REPLACE_SUMMARY_ART_PATH_WITH_LATEST and (
                 isinstance(nv, dict)
                 and handler_util.metric_is_wandb_dict(nv)
                 and "_latest_artifact_path" in nv
@@ -382,17 +412,17 @@ class HandleManager:
                 v[nk] = nv
         return v
 
-    def _update_summary(self, history_dict: Dict[str, Any]) -> bool:
+    def _update_summary(self, history_dict: Dict[str, Any]) -> List[str]:
         # keep old behavior fast path if no define metrics have been used
         if not self._metric_defines:
             history_dict = self._update_summary_media_objects(history_dict)
             self._consolidated_summary.update(history_dict)
-            return True
-        updated = False
+            return list(history_dict.keys())
+        updated_keys = []
         for k, v in history_dict.items():
             if self._update_summary_list(kl=[k], v=v):
-                updated = True
-        return updated
+                updated_keys.append(k)
+        return updated_keys
 
     def _history_assign_step(
         self,
@@ -413,7 +443,7 @@ class HandleManager:
             self._step += 1
 
     def _history_define_metric(self, hkey: str) -> Optional[MetricRecord]:
-        """check for hkey match in glob metrics, return defined metric."""
+        """Check for hkey match in glob metrics and return the defined metric."""
         # Dont define metric for internal metrics
         if hkey.startswith("_"):
             return None
@@ -478,7 +508,6 @@ class HandleManager:
         history: HistoryRecord,
         history_dict: Dict[str, Any],
     ) -> None:
-
         #  if syncing an old run, we can skip this logic
         if history_dict.get("_step") is None:
             self._history_assign_step(history, history_dict)
@@ -507,24 +536,28 @@ class HandleManager:
         self._history_update(record.history, history_dict)
         self._dispatch_record(record)
         self._save_history(record.history)
-        updated = self._update_summary(history_dict)
-        if updated:
-            self._save_summary(self._consolidated_summary)
+        # update summary from history
+        updated_keys = self._update_summary(history_dict)
+        if updated_keys:
+            updated_items = {k: self._consolidated_summary[k] for k in updated_keys}
+            self._save_summary(updated_items)
 
     def _flush_partial_history(
         self,
         step: Optional[int] = None,
     ) -> None:
-        if self._partial_history:
-            history = HistoryRecord()
-            for k, v in self._partial_history.items():
-                item = history.item.add()
-                item.key = k
-                item.value_json = json.dumps(v)
-            if step is not None:
-                history.step.num = step
-            self.handle_history(Record(history=history))
-            self._partial_history = {}
+        if not self._partial_history:
+            return
+
+        history = HistoryRecord()
+        for k, v in self._partial_history.items():
+            item = history.item.add()
+            item.key = k
+            item.value_json = json.dumps(v)
+        if step is not None:
+            history.step.num = step
+        self.handle_history(Record(history=history))
+        self._partial_history = {}
 
     def handle_request_sender_mark_report(self, record: Record) -> None:
         self._dispatch_record(record, always_send=True)
@@ -546,9 +579,18 @@ class HandleManager:
         history_dict = proto_util.dict_from_proto_list(partial_history.item)
         if step is not None:
             if step < self._step:
-                logger.warning(
-                    f"Step {step} < {self._step}. Dropping entry: {history_dict}."
+                if not self._dropped_history:
+                    message = (
+                        "Step only supports monotonically increasing values, use define_metric to set a custom x "
+                        f"axis. For details see: {url_registry.url('define-metric')}"
+                    )
+                    self._internal_messages.warning.append(message)
+                    self._dropped_history = True
+                message = (
+                    f"(User provided step: {step} is less than current step: {self._step}. "
+                    f"Dropping entry: {history_dict})."
                 )
+                self._internal_messages.warning.append(message)
                 return
             elif step > self._step:
                 self._flush_partial_history()
@@ -621,52 +663,16 @@ class HandleManager:
     def handle_footer(self, record: Record) -> None:
         self._dispatch_record(record)
 
-    def handle_request_check_version(self, record: Record) -> None:
-        self._dispatch_record(record)
-
     def handle_request_attach(self, record: Record) -> None:
-        self._dispatch_record(record)
+        result = proto_util._result_from_record(record)
+        attach_id = record.request.attach.attach_id
+        assert attach_id
+        assert self._run_proto
+        result.response.attach_response.run.CopyFrom(self._run_proto)
+        self._respond_result(result)
 
     def handle_request_log_artifact(self, record: Record) -> None:
         self._dispatch_record(record)
-
-    def handle_request_artifact_send(self, record: Record) -> None:
-        assert record.control.req_resp
-        result = proto_util._result_from_record(record)
-
-        self._dispatch_record(record)
-
-        # send response immediately, the request will be polled for result
-        xid = record.uuid
-        result.response.artifact_send_response.xid = xid
-        self._respond_result(result)
-
-    def handle_request_artifact_poll(self, record: Record) -> None:
-        assert record.control.req_resp
-        xid = record.request.artifact_poll.xid
-        assert xid
-
-        result = proto_util._result_from_record(record)
-        done_req = self._artifact_xid_done.get(xid)
-        if done_req:
-            result.response.artifact_poll_response.artifact_id = done_req.artifact_id
-            result.response.artifact_poll_response.error_message = (
-                done_req.error_message
-            )
-            result.response.artifact_poll_response.ready = True
-        self._respond_result(result)
-
-    def handle_request_artifact_done(self, record: Record) -> None:
-        assert not record.control.req_resp
-        done_req = record.request.artifact_done
-        xid = done_req.xid
-        assert xid
-
-        self._artifact_xid_done[xid] = done_req
-
-    # def handle_request_artifact_release(self, record: Record) -> None:
-    #     assert record.control.req_resp
-    #     # TODO: implement release protocol to clean up _artifact_xid_done dict
 
     def handle_telemetry(self, record: Record) -> None:
         self._dispatch_record(record)
@@ -675,6 +681,8 @@ class HandleManager:
         run_start = record.request.run_start
         assert run_start
         assert run_start.run
+
+        self._run_proto = run_start.run
 
         self._run_start_time = run_start.run.start_time.ToMicroseconds() / 1e6
 
@@ -689,23 +697,31 @@ class HandleManager:
             self._settings,
             self._interface,
         )
-        if not self._settings._disable_stats:
+        if not (
+            self._settings.x_disable_stats or self._settings.x_disable_machine_info
+        ):
             self._system_monitor.start()
-        if not self._settings._disable_meta and not run_start.run.resumed:
-            self._system_monitor.probe(publish=True)
+        if (
+            not (self._settings.x_disable_meta or self._settings.x_disable_machine_info)
+            and not run_start.run.resumed
+        ):
+            try:
+                self._metadata = Metadata(**self._system_monitor.probe(publish=True))
+            except Exception as e:
+                logger.error("Error probing system metadata: %s", e)
 
         self._tb_watcher = tb_watcher.TBWatcher(
             self._settings, interface=self._interface, run_proto=run_start.run
         )
 
-        if run_start.run.resumed:
+        if run_start.run.resumed or run_start.run.forked:
             self._step = run_start.run.starting_step
         result = proto_util._result_from_record(record)
         self._respond_result(result)
 
     def handle_request_resume(self, record: Record) -> None:
         if self._system_monitor is not None:
-            logger.info("starting system metrics thread or process")
+            logger.info("starting system metrics thread")
             self._system_monitor.start()
 
         if self._track_time is not None:
@@ -714,7 +730,7 @@ class HandleManager:
 
     def handle_request_pause(self, record: Record) -> None:
         if self._system_monitor is not None:
-            logger.info("stopping system metrics thread or process")
+            logger.info("stopping system metrics thread")
             self._system_monitor.finish()
         if self._track_time is not None:
             self._accumulate_time += time.time() - self._track_time
@@ -729,9 +745,15 @@ class HandleManager:
     def handle_request_network_status(self, record: Record) -> None:
         self._dispatch_record(record)
 
+    def handle_request_internal_messages(self, record: Record) -> None:
+        result = proto_util._result_from_record(record)
+        result.response.internal_messages_response.messages.CopyFrom(
+            self._internal_messages
+        )
+        self._internal_messages.Clear()
+        self._respond_result(result)
+
     def handle_request_status(self, record: Record) -> None:
-        # TODO(mempressure): do something better?
-        assert record.control.req_resp
         result = proto_util._result_from_record(record)
         self._respond_result(result)
 
@@ -742,6 +764,36 @@ class HandleManager:
             item.key = key
             item.value_json = json.dumps(value)
             result.response.get_summary_response.item.append(item)
+        self._respond_result(result)
+
+    def handle_request_get_system_metrics(self, record: Record) -> None:
+        result = proto_util._result_from_record(record)
+        if self._system_monitor is None:
+            return
+
+        buffer = self._system_monitor.buffer
+        for key, samples in buffer.items():
+            buff = []
+            for s in samples:
+                sms = SystemMetricSample()
+                sms.timestamp.FromMicroseconds(int(s[0] * 1e6))
+                sms.value = s[1]
+                buff.append(sms)
+
+            result.response.get_system_metrics_response.system_metrics[key].CopyFrom(
+                SystemMetricsBuffer(record=buff)
+            )
+
+        self._respond_result(result)
+
+    def handle_request_get_system_metadata(self, record: Record) -> None:
+        result = proto_util._result_from_record(record)
+        if self._system_monitor is None or self._metadata is None:
+            return
+
+        result.response.get_system_metadata_response.metadata.CopyFrom(
+            self._metadata.to_proto()
+        )
         self._respond_result(result)
 
     def handle_tbrecord(self, record: Record) -> None:
@@ -815,18 +867,21 @@ class HandleManager:
             item.key = key
             values: Iterable[Any] = sampled.get()
             if all(isinstance(i, numbers.Integral) for i in values):
-                item.values_int.extend(values)
+                try:
+                    item.values_int.extend(values)
+                except ValueError:
+                    # it is safe to ignore these as this is for display information
+                    pass
             elif all(isinstance(i, numbers.Real) for i in values):
                 item.values_float.extend(values)
             result.response.sampled_history_response.item.append(item)
         self._respond_result(result)
 
-    def handle_request_server_info(self, record: Record) -> None:
-        self._dispatch_record(record, always_send=True)
-
     def handle_request_keepalive(self, record: Record) -> None:
-        """keepalive is a noop, we just want to verify transport is alive."""
-        pass
+        """Handle a keepalive request.
+
+        Keepalive is a noop, we just want to verify transport is alive.
+        """
 
     def handle_request_run_status(self, record: Record) -> None:
         self._dispatch_record(record, always_send=True)
@@ -839,6 +894,8 @@ class HandleManager:
 
     def finish(self) -> None:
         logger.info("shutting down handler")
+        if self._system_monitor is not None:
+            self._system_monitor.finish()
         if self._tb_watcher:
             self._tb_watcher.finish()
         # self._context_keeper._debug_print_orphans()

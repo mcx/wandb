@@ -7,7 +7,7 @@ from wandb.proto import wandb_internal_pb2 as pb
 from wandb.proto import wandb_telemetry_pb2 as tpb
 
 from ..interface.interface_queue import InterfaceQueue
-from ..lib import proto_util, telemetry, tracelog
+from ..lib import proto_util, telemetry
 from . import context, datastore, flow_control
 from .settings_static import SettingsStatic
 
@@ -63,7 +63,7 @@ class WriteManager:
         self._telemetry_obj = tpb.TelemetryRecord()
         self._telemetry_overflow = False
         self._use_flow_control = not (
-            self._settings._flow_control_disabled or self._settings._offline
+            self._settings.x_flow_control_disabled or self._settings._offline
         )
 
     def open(self) -> None:
@@ -79,7 +79,6 @@ class WriteManager:
 
     def _forward_record(self, record: "pb.Record") -> None:
         self._context_keeper.add_from_record(record)
-        tracelog.log_message_queue(record, self._sender_q)
         self._sender_q.put(record)
 
     def _send_mark(self) -> None:
@@ -138,7 +137,7 @@ class WriteManager:
             self._flow_control.flow(record)
         elif not self._settings._offline or record.control.always_send:
             # when flow_control is disabled we pass through all records to
-            # the sender as long as we are online.   The exception is there
+            # the sender as long as we are online.  The exception is there
             # are special records that we always pass to the sender
             # (namely the exit record so we can trigger the defer shutdown
             # state machine)
@@ -148,7 +147,7 @@ class WriteManager:
         record_type = record.WhichOneof("record_type")
         assert record_type
         writer_str = "write_" + record_type
-        write_handler: Callable[["pb.Record"], None] = getattr(
+        write_handler: Callable[[pb.Record], None] = getattr(
             self, writer_str, self._write
         )
         write_handler(record)
@@ -157,7 +156,7 @@ class WriteManager:
         request_type = record.request.WhichOneof("request_type")
         assert request_type
         write_request_str = "write_request_" + request_type
-        write_request_handler: Optional[Callable[["pb.Record"], None]] = getattr(
+        write_request_handler: Optional[Callable[[pb.Record], None]] = getattr(
             self, write_request_str, None
         )
         if write_request_handler:
@@ -191,7 +190,6 @@ class WriteManager:
         #     self._sender_cancel_set.add(cancel_id)
 
     def _respond_result(self, result: "pb.Result") -> None:
-        tracelog.log_message_queue(result, self._result_q)
         self._result_q.put(result)
 
     def finish(self) -> None:

@@ -1,7 +1,4 @@
-"""
-module lazyloader
-"""
-
+"""module lazyloader."""
 
 import importlib
 import sys
@@ -41,7 +38,7 @@ class LazyLoader(types.ModuleType):
 
         # Emit a warning if one was specified
         if self._warning:
-            print(self._warning)
+            print(self._warning)  # noqa: T201
             # Make sure to only warn once.
             self._warning = None
 

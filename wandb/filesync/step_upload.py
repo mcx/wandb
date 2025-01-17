@@ -7,7 +7,6 @@ import sys
 import threading
 from typing import (
     TYPE_CHECKING,
-    Any,
     Callable,
     MutableMapping,
     MutableSequence,
@@ -19,15 +18,14 @@ from typing import (
 
 from wandb.errors.term import termerror
 from wandb.filesync import upload_job
+from wandb.sdk.lib.paths import LogicalPath
 
 if TYPE_CHECKING:
-    from wandb.filesync import dir_watcher, stats
-    from wandb.sdk.internal import file_stream, internal_api, progress
+    from typing import TypedDict
 
-    if sys.version_info >= (3, 8):
-        from typing import TypedDict
-    else:
-        from typing_extensions import TypedDict
+    from wandb.filesync import stats
+    from wandb.sdk.internal import file_stream, internal_api, progress
+    from wandb.sdk.internal.settings_static import SettingsStatic
 
     class ArtifactStatus(TypedDict):
         finalize: bool
@@ -39,14 +37,14 @@ if TYPE_CHECKING:
 
 PreCommitFn = Callable[[], None]
 OnRequestFinishFn = Callable[[], None]
-SaveFn = Callable[["progress.ProgressFn"], Any]
+SaveFn = Callable[["progress.ProgressFn"], bool]
 
 logger = logging.getLogger(__name__)
 
 
 class RequestUpload(NamedTuple):
     path: str
-    save_name: "dir_watcher.SaveName"
+    save_name: LogicalPath
     artifact_id: Optional[str]
     md5: Optional[str]
     copied: bool
@@ -65,9 +63,12 @@ class RequestFinish(NamedTuple):
     callback: Optional[OnRequestFinishFn]
 
 
-Event = Union[
-    RequestUpload, RequestCommitArtifact, RequestFinish, upload_job.EventJobDone
-]
+class EventJobDone(NamedTuple):
+    job: RequestUpload
+    exc: Optional[BaseException]
+
+
+Event = Union[RequestUpload, RequestCommitArtifact, RequestFinish, EventJobDone]
 
 
 class StepUpload:
@@ -76,9 +77,9 @@ class StepUpload:
         api: "internal_api.Api",
         stats: "stats.Stats",
         event_queue: "queue.Queue[Event]",
-        max_jobs: int,
+        max_threads: int,
         file_stream: "file_stream.FileStreamApi",
-        silent: bool = False,
+        settings: Optional["SettingsStatic"] = None,
     ) -> None:
         self._api = api
         self._stats = stats
@@ -90,18 +91,16 @@ class StepUpload:
 
         self._pool = concurrent.futures.ThreadPoolExecutor(
             thread_name_prefix="wandb-upload",
-            max_workers=max_jobs,
+            max_workers=max_threads,
         )
 
         # Indexed by files' `save_name`'s, which are their ID's in the Run.
-        self._running_jobs: MutableMapping[
-            dir_watcher.SaveName, upload_job.UploadJob
-        ] = {}
+        self._running_jobs: MutableMapping[LogicalPath, RequestUpload] = {}
         self._pending_jobs: MutableSequence[RequestUpload] = []
 
-        self._artifacts: MutableMapping[str, "ArtifactStatus"] = {}
+        self._artifacts: MutableMapping[str, ArtifactStatus] = {}
 
-        self.silent = silent
+        self.silent = bool(settings.silent) if settings else False
 
     def _thread_body(self) -> None:
         event: Optional[Event]
@@ -129,12 +128,13 @@ class StepUpload:
                 self._handle_event(event)
             elif not self._running_jobs:
                 # Queue was empty and no jobs left.
+                self._pool.shutdown(wait=False)
                 if finish_callback:
                     finish_callback()
                 break
 
     def _handle_event(self, event: Event) -> None:
-        if isinstance(event, upload_job.EventJobDone):
+        if isinstance(event, EventJobDone):
             job = event.job
 
             if event.exc is not None:
@@ -176,7 +176,7 @@ class StepUpload:
                 self._artifacts[event.artifact_id]["pending_count"] += 1
             self._start_upload_job(event)
         else:
-            raise Exception("Programming error: unhandled event: %s" % str(event))
+            raise Exception("Programming error: unhandled event: {}".format(str(event)))
 
     def _start_upload_job(self, event: RequestUpload) -> None:
         # Operations on a single backend file must be serialized. if
@@ -186,24 +186,10 @@ class StepUpload:
             self._pending_jobs.append(event)
             return
 
-        # Start it.
-        job = upload_job.UploadJob(
-            self._stats,
-            self._api,
-            self._file_stream,
-            self.silent,
-            event.save_name,
-            event.path,
-            event.artifact_id,
-            event.md5,
-            event.copied,
-            event.save_fn,
-            event.digest,
-        )
-        self._spawn_upload(job)
+        self._spawn_upload(event)
 
-    def _spawn_upload(self, job: upload_job.UploadJob) -> None:
-        """Spawns an upload job, and handles the bookkeeping of `self._running_jobs`.
+    def _spawn_upload(self, event: RequestUpload) -> None:
+        """Spawn an upload job, and handles the bookkeeping of `self._running_jobs`.
 
         Context: it's important that, whenever we add an entry to `self._running_jobs`,
         we ensure that a corresponding `EventJobDone` message will eventually get handled;
@@ -214,7 +200,6 @@ class StepUpload:
         to `self._running_jobs` is textually right next to the code that eventually enqueues
         the `EventJobDone` message. This should help keep them in sync.
         """
-
         # Adding the entry to `self._running_jobs` MUST happen in the main thread,
         # NOT in the job that gets submitted to the thread-pool, to guard against
         # this sequence of events:
@@ -228,17 +213,31 @@ class StepUpload:
         #
         # This would be very bad!
         # So, this line has to happen _outside_ the `pool.submit()`.
-        self._running_jobs[job.save_name] = job
+        self._running_jobs[event.save_name] = event
 
         def run_and_notify() -> None:
             try:
-                job.run()
+                self._do_upload(event)
             finally:
-                self._event_queue.put(
-                    upload_job.EventJobDone(job=job, exc=sys.exc_info()[1])
-                )
+                self._event_queue.put(EventJobDone(event, exc=sys.exc_info()[1]))
 
         self._pool.submit(run_and_notify)
+
+    def _do_upload(self, event: RequestUpload) -> None:
+        job = upload_job.UploadJob(
+            self._stats,
+            self._api,
+            self._file_stream,
+            self.silent,
+            event.save_name,
+            event.path,
+            event.artifact_id,
+            event.md5,
+            event.copied,
+            event.save_fn,
+            event.digest,
+        )
+        job.run()
 
     def _init_artifact(self, artifact_id: str) -> None:
         self._artifacts[artifact_id] = {

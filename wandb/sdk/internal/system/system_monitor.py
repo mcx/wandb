@@ -1,11 +1,13 @@
+import datetime
 import logging
-import multiprocessing as mp
 import queue
 import threading
-from typing import TYPE_CHECKING, List, Optional, Union
+from collections import defaultdict, deque
+from typing import TYPE_CHECKING, Deque, Dict, List, Optional, Tuple
 
 from .assets.asset_registry import asset_registry
 from .assets.interfaces import Asset, Interface
+from .assets.open_metrics import OpenMetrics
 from .system_info import SystemInfo
 
 if TYPE_CHECKING:
@@ -19,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 class AssetInterface:
     def __init__(self) -> None:
-        self.metrics_queue: "queue.Queue[dict]" = queue.Queue()
-        self.telemetry_queue: "queue.Queue[TelemetryRecord]" = queue.Queue()
+        self.metrics_queue: queue.Queue[dict] = queue.Queue()
+        self.telemetry_queue: queue.Queue[TelemetryRecord] = queue.Queue()
 
     def publish_stats(self, stats: dict) -> None:
         self.metrics_queue.put(stats)
@@ -43,9 +45,10 @@ class SystemMonitor:
         settings: "SettingsStatic",
         interface: "Interface",
     ) -> None:
+        self._shutdown_event: threading.Event = threading.Event()
+        self._process: Optional[threading.Thread] = None
 
-        self._shutdown_event: mp.synchronize.Event = mp.Event()
-        self._process: Optional[Union[mp.Process, threading.Thread]] = None
+        self.settings = settings
 
         # settings._stats_join_assets controls whether we should join stats from different assets
         # before publishing them to the backend. If set to False, we will publish stats from each
@@ -57,16 +60,11 @@ class SystemMonitor:
 
         # compute the global publishing interval if _stats_join_assets is requested
         sampling_interval: float = float(
-            max(
-                0.1,
-                settings._stats_sample_rate_seconds,
-            )
+            max(0.1, self.settings.x_stats_sampling_interval)
         )  # seconds
-        # The number of samples to aggregate (e.g. average or compute max/min etc.)
-        # before publishing; defaults to 15; valid range: [1:30]
-        samples_to_aggregate: int = min(30, max(1, settings._stats_samples_to_average))
+        samples_to_aggregate: int = 1
         self.publishing_interval: float = sampling_interval * samples_to_aggregate
-        self.join_assets: bool = settings._stats_join_assets
+        self.join_assets: bool = False
 
         self.backend_interface = interface
         self.asset_interface: Optional[AssetInterface] = (
@@ -74,20 +72,50 @@ class SystemMonitor:
         )
 
         # hardware assets
-        self.assets: List["Asset"] = []
-        for asset_class in asset_registry:
-            self.assets.append(
-                asset_class(
-                    interface=self.asset_interface or self.backend_interface,
-                    settings=settings,
-                    shutdown_event=self._shutdown_event,
-                )
-            )
+        self.assets: List[Asset] = self._get_assets()
+
+        # OpenMetrics/Prometheus-compatible endpoints
+        self.assets.extend(self._get_open_metrics_assets())
 
         # static system info, both hardware and software
         self.system_info: SystemInfo = SystemInfo(
-            settings=settings, interface=interface
+            settings=self.settings, interface=interface
         )
+
+        self.buffer: Dict[str, Deque[Tuple[float, float]]] = defaultdict(
+            lambda: deque([], maxlen=self.settings.x_stats_buffer_size)
+        )
+
+    def _get_assets(self) -> List["Asset"]:
+        return [
+            asset_class(
+                interface=self.asset_interface or self.backend_interface,
+                settings=self.settings,
+                shutdown_event=self._shutdown_event,
+            )
+            for asset_class in asset_registry
+        ]
+
+    def _get_open_metrics_assets(self) -> List["Asset"]:
+        open_metrics_endpoints = self.settings.x_stats_open_metrics_endpoints
+        if not open_metrics_endpoints:
+            return []
+
+        assets: List[Asset] = []
+        for name, endpoint in open_metrics_endpoints.items():
+            if not OpenMetrics.is_available(url=endpoint):
+                continue
+            logger.debug(f"Monitoring OpenMetrics endpoint: {endpoint}")
+            open_metrics = OpenMetrics(
+                interface=self.asset_interface or self.backend_interface,
+                settings=self.settings,
+                shutdown_event=self._shutdown_event,
+                name=name,
+                url=endpoint,
+            )
+            assets.append(open_metrics)  # type: ignore
+
+        return assets
 
     def aggregate_and_publish_asset_metrics(self) -> None:
         if self.asset_interface is None:
@@ -101,6 +129,13 @@ class SystemMonitor:
             aggregated_metrics.update(item)
 
         if aggregated_metrics:
+            # update buffer:
+            # todo: get it from publish_stats instead?
+            #  either is not too accurate, just use wandb-core!
+            t = datetime.datetime.now().timestamp()
+            for k, v in aggregated_metrics.items():
+                self.buffer[k].append((t, v))
+            # publish aggregated metrics
             self.backend_interface.publish_stats(aggregated_metrics)
 
     def publish_telemetry(self) -> None:
@@ -147,13 +182,13 @@ class SystemMonitor:
 
     def start(self) -> None:
         self._shutdown_event.clear()
-        if self._process is None:
-            logger.info("Starting system monitor")
-            # self._process = mp.Process(target=self._start, name="SystemMonitor")
-            self._process = threading.Thread(
-                target=self._start, daemon=True, name="SystemMonitor"
-            )
-            self._process.start()
+        if self._process is not None:
+            return None
+        logger.info("Starting system monitor")
+        self._process = threading.Thread(
+            target=self._start, daemon=True, name="SystemMonitor"
+        )
+        self._process.start()
 
     def finish(self) -> None:
         if self._process is None:
@@ -168,7 +203,7 @@ class SystemMonitor:
             logger.error(f"Error joining system monitor process: {e}")
         self._process = None
 
-    def probe(self, publish: bool = True) -> None:
+    def probe(self, publish: bool = True) -> dict:
         logger.info("Collecting system info")
         # collect static info about the hardware from registered assets
         hardware_info: dict = {
@@ -185,3 +220,5 @@ class SystemMonitor:
             logger.info("Publishing system info")
             self.system_info.publish(system_info)
             logger.info("Finished publishing system info")
+
+        return system_info

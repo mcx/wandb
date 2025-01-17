@@ -22,11 +22,13 @@ import logging
 import os
 import struct
 import zlib
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import wandb
 
 if TYPE_CHECKING:
+    from typing import IO, Any
+
     from wandb.proto.wandb_internal_pb2 import Record
 
 logger = logging.getLogger(__name__)
@@ -50,7 +52,7 @@ try:
     bytes("", "ascii")
 
     def strtobytes(x):
-        """strtobytes."""
+        """Strtobytes."""
         return bytes(x, "iso8859-1")
 
     # def bytestostr(x):
@@ -67,7 +69,7 @@ class DataStore:
 
     def __init__(self) -> None:
         self._opened_for_scan = False
-        self._fp = None
+        self._fp: Optional[IO[Any]] = None
         self._index = 0
         self._flush_offset = 0
         self._size_bytes = 0
@@ -77,7 +79,7 @@ class DataStore:
             self._crc[x] = zlib.crc32(strtobytes(chr(x))) & 0xFFFFFFFF
 
         assert (
-            wandb._assert_is_internal_process
+            wandb._assert_is_internal_process  # type: ignore
         ), "DataStore can only be used in the internal process"
 
     def open_for_write(self, fname: str) -> None:
@@ -104,16 +106,15 @@ class DataStore:
         self._read_header()
 
     def seek(self, offset: int) -> None:
-        self._fp.seek(offset)
+        self._fp.seek(offset)  # type: ignore
         self._index = offset
 
     def get_offset(self) -> int:
-        offset = self._fp.tell()
+        offset = self._fp.tell()  # type: ignore
         return offset
 
     def in_last_block(self):
-        """When reading, we want to know if we're in the last block to
-        handle in progress writes"""
+        """Determine if we're in the last block to handle in-progress writes."""
         return self._index > self._size_bytes - LEVELDBLOG_DATA_LEN
 
     def scan_record(self):
@@ -173,9 +174,7 @@ class DataStore:
                 break
             assert (
                 dtype == LEVELDBLOG_MIDDLE
-            ), "expected record to be type {} but found {}".format(
-                LEVELDBLOG_MIDDLE, dtype
-            )
+            ), f"expected record to be type {LEVELDBLOG_MIDDLE} but found {dtype}"
             data += new_data
         return data
 
@@ -188,9 +187,7 @@ class DataStore:
         )
         assert (
             len(data) == LEVELDBLOG_HEADER_LEN
-        ), "header size is {} bytes, expected {}".format(
-            len(data), LEVELDBLOG_HEADER_LEN
-        )
+        ), f"header size is {len(data)} bytes, expected {LEVELDBLOG_HEADER_LEN}"
         self._fp.write(data)
         self._index += len(data)
 
@@ -260,7 +257,7 @@ class DataStore:
             # write middles (if any)
             while data_left > LEVELDBLOG_DATA_LEN:
                 self._write_record(
-                    s[data_used : data_used + LEVELDBLOG_DATA_LEN],  # noqa: E203
+                    s[data_used : data_used + LEVELDBLOG_DATA_LEN],
                     LEVELDBLOG_MIDDLE,
                 )
                 data_used += LEVELDBLOG_DATA_LEN
@@ -275,12 +272,12 @@ class DataStore:
         return start_offset, self._index, self._flush_offset
 
     def ensure_flushed(self, off: int) -> None:
-        self._fp.flush()
+        self._fp.flush()  # type: ignore
 
     def write(self, obj: "Record") -> Tuple[int, int, int]:
         """Write a protocol buffer.
 
-        Arguments:
+        Args:
             obj: Protocol buffer to write.
 
         Returns:

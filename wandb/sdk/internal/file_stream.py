@@ -1,5 +1,6 @@
-import base64
+import functools
 import itertools
+import json
 import logging
 import os
 import queue
@@ -23,10 +24,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    if sys.version_info >= (3, 8):
-        from typing import TypedDict
-    else:
-        from typing_extensions import TypedDict
+    from typing import TypedDict
 
     class ProcessedChunk(TypedDict):
         offset: int
@@ -41,7 +39,7 @@ if TYPE_CHECKING:
 import requests
 
 import wandb
-from wandb import env, util
+from wandb import util
 from wandb.sdk.internal import internal_api
 
 from ..lib import file_stream_utils
@@ -51,12 +49,13 @@ logger = logging.getLogger(__name__)
 
 class Chunk(NamedTuple):
     filename: str
-    data: Any
+    data: str
 
 
 class DefaultFilePolicy:
     def __init__(self, start_chunk_id: int = 0) -> None:
         self._chunk_id = start_chunk_id
+        self.has_debug_log = False
 
     def process_chunks(
         self, chunks: List[Chunk]
@@ -64,6 +63,21 @@ class DefaultFilePolicy:
         chunk_id = self._chunk_id
         self._chunk_id += len(chunks)
         return {"offset": chunk_id, "content": [c.data for c in chunks]}
+
+    # TODO: this is very inefficient, this is meant for temporary debugging and will be removed in future releases
+    def _debug_log(self, data: Any):
+        if self.has_debug_log or not os.environ.get("WANDB_DEBUG_FILESTREAM_LOG"):
+            return
+
+        loaded = json.loads(data)
+        if not isinstance(loaded, dict):
+            return
+
+        # get key size and convert to MB
+        key_sizes = [(k, len(json.dumps(v))) for k, v in loaded.items()]
+        key_msg = [f"{k}: {v/1048576:.5f} MB" for k, v in key_sizes]
+        wandb.termerror(f"Step: {loaded['_step']} | {key_msg}", repeat=False)
+        self.has_debug_log = True
 
 
 class JsonlFilePolicy(DefaultFilePolicy):
@@ -79,7 +93,8 @@ class JsonlFilePolicy(DefaultFilePolicy):
                     util.to_human_size(len(chunk.data)),
                 )
                 wandb.termerror(msg, repeat=False)
-                util.sentry_message(msg)
+                wandb._sentry.message(msg, repeat=False)
+                self._debug_log(chunk.data)
             else:
                 chunk_data.append(chunk.data)
 
@@ -97,14 +112,16 @@ class SummaryFilePolicy(DefaultFilePolicy):
                 util.to_human_size(util.MAX_LINE_BYTES)
             )
             wandb.termerror(msg, repeat=False)
-            util.sentry_message(msg)
+            wandb._sentry.message(msg, repeat=False)
+            self._debug_log(data)
             return False
         return {"offset": 0, "content": [data]}
 
 
 class StreamCRState:
-    """There are two streams: stdout and stderr.
-    We create two instances for each stream.
+    r"""Stream state that tracks carriage returns.
+
+    There are two streams: stdout and stderr. We create two instances for each stream.
     An instance holds state about:
         found_cr:       if a carriage return has been found in this stream.
         cr:             most recent offset (line number) where we found \r.
@@ -124,17 +141,16 @@ class StreamCRState:
 
 
 class CRDedupeFilePolicy(DefaultFilePolicy):
-    """File stream policy that removes characters that would be erased by
-    carriage returns.
+    r"""File stream policy for removing carriage-return erased characters.
 
-    This is what a terminal does. We use it for console output to reduce the
-    amount of data we need to send over the network (eg. for progress bars),
-    while preserving the output's appearance in the web app.
+    This is what a terminal does. We use it for console output to reduce the amount of
+    data we need to send over the network (eg. for progress bars), while preserving the
+    output's appearance in the web app.
 
-    CR stands for "carriage return", for the character \r. It tells the terminal
-    to move the cursor back to the start of the current line. Progress bars
-    (like tqdm) use \r repeatedly to overwrite a line with newer updates.
-    This gives the illusion of the progress bar filling up in real-time.
+    CR stands for "carriage return", for the character \r. It tells the terminal to move
+    the cursor back to the start of the current line. Progress bars (like tqdm) use \r
+    repeatedly to overwrite a line with newer updates. This gives the illusion of the
+    progress bar filling up in real-time.
     """
 
     def __init__(self, start_chunk_id: int = 0) -> None:
@@ -148,7 +164,8 @@ class CRDedupeFilePolicy(DefaultFilePolicy):
 
     @staticmethod
     def get_consecutive_offsets(console: Dict[int, str]) -> List[List[int]]:
-        """
+        """Compress consecutive line numbers into an interval.
+
         Args:
             console: Dict[int, str] which maps offsets (line numbers) to lines of text.
             It represents a mini version of our console dashboard on the UI.
@@ -176,13 +193,14 @@ class CRDedupeFilePolicy(DefaultFilePolicy):
 
     @staticmethod
     def split_chunk(chunk: Chunk) -> Tuple[str, str]:
-        """
+        r"""Split chunks.
+
         Args:
             chunk: object with two fields: filename (str) & data (str)
             `chunk.data` is a str containing the lines we want. It usually contains \n or \r or both.
             `chunk.data` has two possible formats (for the two streams - stdout and stderr):
                 - "2020-08-25T20:38:36.895321 this is my line of text\nsecond line\n"
-                - "ERROR 2020-08-25T20:38:36.895321 this is my line of text\nsecond line\nthird\n"
+                - "ERROR 2020-08-25T20:38:36.895321 this is my line of text\nsecond line\nthird\n".
 
                 Here's another example with a carriage return \r.
                 - "ERROR 2020-08-25T20:38:36.895321 \r progress bar\n"
@@ -193,7 +211,10 @@ class CRDedupeFilePolicy(DefaultFilePolicy):
             Second str is the rest of the string.
 
         Example:
-            >>> chunk = Chunk(filename="output.log", data="ERROR 2020-08-25T20:38 this is my line of text\n")
+            >>> chunk = Chunk(
+            ...     filename="output.log",
+            ...     data="ERROR 2020-08-25T20:38 this is my line of text\n",
+            ... )
             >>> split_chunk(chunk)
             ("ERROR 2020-08-25T20:38 ", "this is my line of text\n")
         """
@@ -205,8 +226,9 @@ class CRDedupeFilePolicy(DefaultFilePolicy):
         prefix += token + " "
         return prefix, rest
 
-    def process_chunks(self, chunks: List) -> List["ProcessedChunk"]:
-        """
+    def process_chunks(self, chunks: List[Chunk]) -> List["ProcessedChunk"]:
+        r"""Process chunks.
+
         Args:
             chunks: List of Chunk objects. See description of chunk above in `split_chunk(...)`.
 
@@ -268,25 +290,13 @@ class CRDedupeFilePolicy(DefaultFilePolicy):
 
         intervals = self.get_consecutive_offsets(console)
         ret = []
-        for (a, b) in intervals:
-            processed_chunk: "ProcessedChunk" = {
-                "offset": a,
+        for a, b in intervals:
+            processed_chunk: ProcessedChunk = {
+                "offset": self._chunk_id + a,
                 "content": [console[i] for i in range(a, b + 1)],
             }
             ret.append(processed_chunk)
         return ret
-
-
-class BinaryFilePolicy(DefaultFilePolicy):
-    def __init__(self) -> None:
-        super().__init__()
-        self._offset: int = 0
-
-    def process_chunks(self, chunks: List[Chunk]) -> "ProcessedBinaryChunk":
-        data = b"".join([c.data for c in chunks])
-        enc = base64.b64encode(data).decode("ascii")
-        self._offset += len(data)
-        return {"offset": self._offset, "content": enc, "encoding": "base64"}
 
 
 class FileStreamApi:
@@ -308,7 +318,6 @@ class FileStreamApi:
         artifact_id: str
         save_name: str
 
-    HTTP_TIMEOUT = env.get_http_timeout(10)
     MAX_ITEMS_PER_PUSH = 10000
 
     def __init__(
@@ -316,6 +325,7 @@ class FileStreamApi:
         api: "internal_api.Api",
         run_id: str,
         start_time: float,
+        timeout: float = 0,
         settings: Optional[dict] = None,
     ) -> None:
         settings = settings or dict()
@@ -331,17 +341,14 @@ class FileStreamApi:
         self._run_id = run_id
         self._start_time = start_time
         self._client = requests.Session()
-        # todo: actually use the timeout once more thorough error injection in testing covers it
-        # self._client.post = functools.partial(self._client.post, timeout=self.HTTP_TIMEOUT)
-        self._client.auth = ("api", api.api_key or "")
-        self._client.headers.update(
-            {
-                "User-Agent": api.user_agent,
-                "X-WANDB-USERNAME": env.get_username() or "",
-                "X-WANDB-USER-EMAIL": env.get_user_email() or "",
-            }
-        )
-        self._file_policies: Dict[str, "DefaultFilePolicy"] = {}
+        timeout = timeout or 0
+        if timeout > 0:
+            self._client.post = functools.partial(self._client.post, timeout=timeout)  # type: ignore[method-assign]
+        self._client.auth = api.client.transport.session.auth
+        self._client.headers.update(api.client.transport.headers or {})
+        self._client.cookies.update(api.client.transport.cookies or {})  # type: ignore[no-untyped-call]
+        self._client.proxies.update(api.client.transport.session.proxies or {})
+        self._file_policies: Dict[str, DefaultFilePolicy] = {}
         self._dropped_chunks: int = 0
         self._queue: queue.Queue = queue.Queue()
         self._thread = threading.Thread(target=self._thread_except_body)
@@ -411,7 +418,7 @@ class FileStreamApi:
         posted_anything_time = time.time()
         ready_chunks = []
         uploaded: Set[str] = set()
-        finished: Optional["FileStreamApi.Finish"] = None
+        finished: Optional[FileStreamApi.Finish] = None
         while finished is None:
             items = self._read_queue()
             for item in items:
@@ -491,16 +498,16 @@ class FileStreamApi:
             exc_info = sys.exc_info()
             self._exc_info = exc_info
             logger.exception("generic exception in filestream thread")
-            util.sentry_exc(exc_info, delay=True)
+            wandb._sentry.exception(exc_info)
             raise e
 
     def _handle_response(self, response: Union[Exception, "requests.Response"]) -> None:
-        """Logs dropped chunks and updates dynamic settings"""
+        """Log dropped chunks and updates dynamic settings."""
         if isinstance(response, Exception):
             wandb.termerror(
                 "Dropped streaming file chunk (see wandb/debug-internal.log)"
             )
-            logging.exception("dropped chunk %s" % response)
+            logger.exception("dropped chunk {}".format(response))
             self._dropped_chunks += 1
         else:
             parsed: Optional[dict] = None
@@ -565,35 +572,37 @@ class FileStreamApi:
     def enqueue_preempting(self) -> None:
         self._queue.put(self.Preempting())
 
-    def push(self, filename: str, data: Any) -> None:
+    def push(self, filename: str, data: str) -> None:
         """Push a chunk of a file to the streaming endpoint.
 
-        Arguments:
-            filename: Name of file that this is a chunk of.
-            data: File data.
+        Args:
+            filename: Name of file to append to.
+            data: Text to append to the file.
         """
         self._queue.put(Chunk(filename, data))
 
     def push_success(self, artifact_id: str, save_name: str) -> None:
-        """Notification that a file upload has been successfully completed
+        """Notification that a file upload has been successfully completed.
 
-        Arguments:
+        Args:
             artifact_id: ID of artifact
             save_name: saved name of the uploaded file
         """
         self._queue.put(self.PushSuccess(artifact_id, save_name))
 
     def finish(self, exitcode: int) -> None:
-        """Cleans up.
+        """Clean up.
 
         Anything pushed after finish will be dropped.
 
-        Arguments:
+        Args:
             exitcode: The exitcode of the watched process.
         """
+        logger.info("file stream finish called")
         self._queue.put(self.Finish(exitcode))
         # TODO(jhr): join on a thread which exited with an exception is a noop, clean up this path
         self._thread.join()
+        logger.info("file stream finish is done")
         if self._exc_info:
             logger.error("FileStream exception", exc_info=self._exc_info)
             # re-raising the original exception, will get re-caught in internal.py for the sender thread
@@ -611,7 +620,7 @@ def request_with_retry(
 ) -> Union["requests.Response", "requests.RequestException"]:
     """Perform a requests http call, retrying with exponential backoff.
 
-    Arguments:
+    Args:
         func:        An http-requesting function to call, like requests.post
         max_retries: Maximum retries before giving up.
                      By default, we retry 30 times in ~2 hours before dropping the chunk
@@ -624,7 +633,7 @@ def request_with_retry(
     retry_count = 0
     while True:
         try:
-            response: "requests.Response" = func(*args, **kwargs)
+            response: requests.Response = func(*args, **kwargs)
             response.raise_for_status()
             return response
         except (
@@ -655,15 +664,13 @@ def request_with_retry(
                 e.response is not None and e.response.status_code == 429
             ):
                 err_str = (
-                    "Filestream rate limit exceeded, retrying in {} seconds".format(
-                        delay
-                    )
+                    "Filestream rate limit exceeded, "
+                    f"retrying in {delay:.1f} seconds. "
                 )
                 if retry_callback:
                     retry_callback(e.response.status_code, err_str)
                 logger.info(err_str)
             else:
-                pass
                 logger.warning(
                     "requests_with_retry encountered retryable exception: %s. func: %s, args: %s, kwargs: %s",
                     e,

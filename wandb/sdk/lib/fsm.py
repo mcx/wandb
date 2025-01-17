@@ -9,19 +9,21 @@ Usage:
         def on_output(self, inputs) -> None:
             pass
 
+
     class B:
         def on_output(self, inputs) -> None:
             pass
 
+
     def to_b(inputs) -> bool:
         return True
+
 
     def to_a(inputs) -> bool:
         return True
 
-    f = Fsm(states=[A(), B()],
-            table={A: [(to_b, B)],
-                   B: [(to_a, A)]})
+
+    f = Fsm(states=[A(), B()], table={A: [(to_b, B)], B: [(to_a, A)]})
     f.run({"input1": 1, "input2": 2})
     ```
 """
@@ -29,12 +31,18 @@ Usage:
 import sys
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Dict, Generic, Optional, Sequence, Type, TypeVar, Union
-
-if sys.version_info >= (3, 8):
-    from typing import Protocol, runtime_checkable
-else:
-    from typing_extensions import Protocol, runtime_checkable
+from typing import (
+    Callable,
+    Dict,
+    Generic,
+    Optional,
+    Protocol,
+    Sequence,
+    Type,
+    TypeVar,
+    Union,
+    runtime_checkable,
+)
 
 if sys.version_info >= (3, 10):
     from typing import TypeAlias
@@ -50,46 +58,42 @@ T_FsmContext_contra = TypeVar("T_FsmContext_contra", contravariant=True)
 @runtime_checkable
 class FsmStateCheck(Protocol[T_FsmInputs]):
     @abstractmethod
-    def on_check(self, inputs: T_FsmInputs) -> None:
-        ...  # pragma: no cover
+    def on_check(self, inputs: T_FsmInputs) -> None: ...  # pragma: no cover
 
 
 @runtime_checkable
 class FsmStateOutput(Protocol[T_FsmInputs]):
     @abstractmethod
-    def on_state(self, inputs: T_FsmInputs) -> None:
-        ...  # pragma: no cover
+    def on_state(self, inputs: T_FsmInputs) -> None: ...  # pragma: no cover
 
 
 @runtime_checkable
 class FsmStateEnter(Protocol[T_FsmInputs]):
     @abstractmethod
-    def on_enter(self, inputs: T_FsmInputs) -> None:
-        ...  # pragma: no cover
+    def on_enter(self, inputs: T_FsmInputs) -> None: ...  # pragma: no cover
 
 
 @runtime_checkable
 class FsmStateEnterWithContext(Protocol[T_FsmInputs, T_FsmContext_contra]):
     @abstractmethod
-    def on_enter(self, inputs: T_FsmInputs, context: T_FsmContext_contra) -> None:
-        ...  # pragma: no cover
+    def on_enter(
+        self, inputs: T_FsmInputs, context: T_FsmContext_contra
+    ) -> None: ...  # pragma: no cover
 
 
 @runtime_checkable
 class FsmStateStay(Protocol[T_FsmInputs]):
     @abstractmethod
-    def on_stay(self, inputs: T_FsmInputs) -> None:
-        ...  # pragma: no cover
+    def on_stay(self, inputs: T_FsmInputs) -> None: ...  # pragma: no cover
 
 
 @runtime_checkable
 class FsmStateExit(Protocol[T_FsmInputs, T_FsmContext_cov]):
     @abstractmethod
-    def on_exit(self, inputs: T_FsmInputs) -> T_FsmContext_cov:
-        ...  # pragma: no cover
+    def on_exit(self, inputs: T_FsmInputs) -> T_FsmContext_cov: ...  # pragma: no cover
 
 
-# It would be nice if python provided optional protocol members, but it doesnt as described here:
+# It would be nice if python provided optional protocol members, but it does not as described here:
 #   https://peps.python.org/pep-0544/#support-optional-protocol-members
 # Until then, we can only enforce that a state at least supports one protocol interface.  This
 # unfortunately will not check the signature of other potential protocols.

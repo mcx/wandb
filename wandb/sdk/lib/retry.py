@@ -12,8 +12,9 @@ from typing import Any, Awaitable, Callable, Generic, Optional, Tuple, Type, Typ
 from requests import HTTPError
 
 import wandb
-from wandb.errors import ContextCancelledError
 from wandb.util import CheckRetryFnType
+
+from .mailbox import ContextCancelledError
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ SLEEP_ASYNC_FN = asyncio.sleep
 
 
 class TransientError(Exception):
-    """Exception type designated for errors that may only be temporary
+    """Exception type designated for errors that may only be temporary.
 
     Can have its own message and/or wrap another exception.
     """
@@ -43,7 +44,7 @@ _R = TypeVar("_R")
 
 
 class Retry(Generic[_R]):
-    """Creates a retryable version of a function.
+    """Create a retryable version of a function.
 
     Calling this will call the passed function, retrying if any exceptions in
     retryable_exceptions are caught, with exponential backoff.
@@ -93,12 +94,11 @@ class Retry(Generic[_R]):
     def __call__(self, *args: Any, **kwargs: Any) -> _R:  # noqa: C901
         """Call the wrapped function, with retries.
 
-        Arguments:
+        Args:
            retry_timedelta (kwarg): amount of time to retry before giving up.
            sleep_base (kwarg): amount of time to sleep upon first failure, all other sleeps
                are derived from this one.
         """
-
         retry_timedelta = kwargs.pop("retry_timedelta", self._retry_timedelta)
         if retry_timedelta is None:
             retry_timedelta = datetime.timedelta(days=365)
@@ -160,7 +160,7 @@ class Retry(Generic[_R]):
                     if not start_time_triggered:
                         start_time_triggered = now
 
-                    # make sure that we havent run out of time from secondary trigger
+                    # make sure that we haven't run out of time from secondary trigger
                     if now - start_time_triggered >= retry_timedelta_triggered:
                         raise
 
@@ -248,8 +248,9 @@ class ExponentialBackoff(Backoff):
         if self._timeout_at is not None and NOW_FN() > self._timeout_at:
             raise exc
 
-        result, self._next_sleep = self._next_sleep, min(
-            self._max_sleep, self._next_sleep * (1 + random.random())
+        result, self._next_sleep = (
+            self._next_sleep,
+            min(self._max_sleep, self._next_sleep * (1 + random.random())),
         )
 
         return result
@@ -279,7 +280,6 @@ async def retry_async(
 
     Each time `fn` fails, `on_exc` is called with the exception.
     """
-
     while True:
         try:
             return await fn(*args, **kwargs)

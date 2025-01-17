@@ -1,4 +1,4 @@
-"""Prodigy integration for W&B
+"""Prodigy integration for W&B.
 
 User can upload Prodigy annotated datasets directly
 from the local database to W&B in Tables format.
@@ -26,15 +26,15 @@ from PIL import Image
 
 import wandb
 from wandb import util
-from wandb.plots.utils import test_missing
+from wandb.plot.utils import test_missing
 from wandb.sdk.lib import telemetry as wb_telemetry
 
 
 def named_entity(docs):
-    """Creates a named entity visualization.
-    Taken from https://github.com/wandb/wandb/blob/main/wandb/plots/named_entity.py
-    """
+    """Create a named entity visualization.
 
+    Taken from https://github.com/wandb/wandb/blob/main/wandb/plots/named_entity.py.
+    """
     spacy = util.get_module(
         "spacy",
         required="part_of_speech requires the spacy library, install with `pip install spacy`",
@@ -68,7 +68,7 @@ def merge(dict1, dict2):
 
 
 def get_schema(list_data_dict, struct, array_dict_types):
-    """Get a schema of the dataset's structure and data types"""
+    """Get a schema of the dataset's structure and data types."""
     # Get the structure of the JSON objects in the database
     # This is similar to getting a JSON schema but with slightly different format
     for _i, item in enumerate(list_data_dict):
@@ -203,7 +203,6 @@ def create_table(data):
 
     # Go through each individual row
     for _i, document in enumerate(matrix):
-
         # Text NER span visualizations
         if ("spans_visual" in columns) and ("text" in columns):
             # Add visuals for spans
@@ -238,11 +237,7 @@ def create_table(data):
                         im = Image.open(urllib.request.urlopen(document["image"]))
                         document["image_visual"] = wandb.Image(im)
                     except urllib.error.URLError:
-                        print(
-                            "Warning: Image URL "
-                            + str(document["image"])
-                            + " is invalid."
-                        )
+                        wandb.termwarn(f"Image URL {document['image']} is invalid.")
                         document["image_visual"] = None
                 elif isbase64:
                     # is base64 uri
@@ -253,11 +248,7 @@ def create_table(data):
                         im = Image.open(buf)
                         document["image_visual"] = wandb.Image(im)
                     except base64.binascii.Error:
-                        print(
-                            "Warning: Base64 string "
-                            + str(document["image"])
-                            + " is invalid."
-                        )
+                        wandb.termwarn(f"Base64 string {document['image']} is invalid.")
                         document["image_visual"] = None
                 else:
                     # is data path
@@ -270,7 +261,7 @@ def create_table(data):
 
 
 def upload_dataset(dataset_name):
-    """Uploads dataset from local database to Weights & Biases.
+    """Upload dataset from local database to Weights & Biases.
 
     Args:
         dataset_name: The name of the dataset in the Prodigy database.
@@ -297,4 +288,4 @@ def upload_dataset(dataset_name):
         standardize(data[i], schema, array_dict_types)
     table = create_table(data)
     wandb.log({dataset_name: table})
-    print("Prodigy dataset `" + dataset_name + "` uploaded.")
+    wandb.termlog(f"Prodigy dataset `{dataset_name}` uploaded.")

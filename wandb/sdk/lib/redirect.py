@@ -50,7 +50,7 @@ class _Numpy:  # fallback in case numpy is not available
 try:
     import numpy as np  # type: ignore
 except ImportError:
-    np = _Numpy()
+    np = _Numpy()  # type: ignore
 
 
 logger = logging.getLogger("wandb")
@@ -104,9 +104,7 @@ def _get_char(code):
 
 
 class Char:
-    """
-    Class encapsulating a single character, its foreground, background and style attributes
-    """
+    """Class encapsulating a single character, its foreground, background and style attributes."""
 
     __slots__ = (
         "data",
@@ -174,17 +172,17 @@ _defchar = Char()
 
 
 class Cursor:
-    """
-    2D cursor
+    """A 2D cursor.
+
+    Attributes:
+        x: x-coordinate.
+        y: y-coordinate.
+        char: the character to inherit colors and styles from.
     """
 
     __slots__ = ("x", "y", "char")
 
     def __init__(self, x=0, y=0, char=None):
-        """
-        x, y - 2D coordinates
-        char - Next character to be written will inherit colors and styles from this character
-        """
         if char is None:
             char = Char()
         self.x = x
@@ -193,8 +191,9 @@ class Cursor:
 
 
 class TerminalEmulator:
-    """
-    An FSM emulating a terminal. Characters are stored in a 2D matrix (buffer) indexed by the cursor.
+    """An FSM emulating a terminal.
+
+    Characters are stored in a 2D matrix (buffer) indexed by the cursor.
     """
 
     _MAX_LINES = 100
@@ -225,7 +224,7 @@ class TerminalEmulator:
     def carriage_return(self):
         self.cursor.x = 0
 
-    def cursor_postion(self, line, column):
+    def cursor_position(self, line, column):
         self.cursor.x = min(column, 1) - 1
         self.cursor.y = min(line, 1) - 1
 
@@ -394,25 +393,30 @@ class TerminalEmulator:
                         p = (int(p[0]), 1)
                     else:
                         p = (1, 1)
-                    self.cursor_postion(*p)
+                    self.cursor_position(*p)
         except Exception:
             pass
 
     def _get_line(self, n):
         line = self.buffer[n]
         line_len = self._get_line_len(n)
-        # We have to loop through each character in the line and check if foreground, background and
-        # other attributes (italics, bold, underline, etc) of the ith character are different from those of the
-        # (i-1)th character. If different, the appropriate ascii character for switching the color/attribute
-        # should be appended to the output string before appending the actual character. This loop and subsequent
-        # checks can be expensive, especially because 99% of terminal output use default colors and formatting. Even
-        # in outputs that do contain colors and styles, its unlikely that they will change on a per character basis.
+        # We have to loop through each character in the line and check if foreground,
+        # background and other attributes (italics, bold, underline, etc) of the ith
+        # character are different from those of the (i-1)th character. If different, the
+        # appropriate ascii character for switching the color/attribute should be
+        # appended to the output string before appending the actual character. This loop
+        # and subsequent checks can be expensive, especially because 99% of terminal
+        # output use default colors and formatting. Even in outputs that do contain
+        # colors and styles, its unlikely that they will change on a per character
+        # basis.
 
-        # So instead we create a character list without any ascii codes (`out`), and a list of all the foregrounds
-        # in the line (`fgs`) on which we call np.diff() and np.where() to find the indices where the foreground change,
-        # and insert the ascii characters in the output list (`out`) on those indices. All of this is the done ony if
-        # there are more than 1 foreground color in the line in the first place (`if len(set(fgs)) > 1 else None`).
-        # Same logic is repeated for background colors and other attributes.
+        # So instead we create a character list without any ascii codes (`out`), and a
+        # list of all the foregrounds in the line (`fgs`) on which we call np.diff() and
+        # np.where() to find the indices where the foreground change, and insert the
+        # ascii characters in the output list (`out`) on those indices. All of this is
+        # the done only if there are more than 1 foreground color in the line in the
+        # first place (`if len(set(fgs)) > 1 else None`). Same logic is repeated for
+        # background colors and other attributes.
 
         out = [line[i].data for i in range(line_len)]
 
@@ -488,8 +492,7 @@ _MIN_CALLBACK_INTERVAL = 2  # seconds
 
 class RedirectBase:
     def __init__(self, src, cbs=()):
-        """
-        # Arguments
+        """# Arguments.
 
         `src`: Source stream to be redirected. "stdout" or "stderr".
         `cbs`: tuple/list of callbacks. Each callback should take exactly 1 argument (bytes).
@@ -501,7 +504,7 @@ class RedirectBase:
 
     @property
     def src_stream(self):
-        return getattr(sys, "__%s__" % self.src)
+        return getattr(sys, "__{}__".format(self.src))
 
     @property
     def src_fd(self):
@@ -527,9 +530,7 @@ class RedirectBase:
 
 
 class StreamWrapper(RedirectBase):
-    """
-    Patches the write method of current sys.stdout/sys.stderr
-    """
+    """Patches the write method of current sys.stdout/sys.stderr."""
 
     def __init__(self, src, cbs=()):
         super().__init__(src=src, cbs=cbs)
@@ -620,8 +621,7 @@ class StreamWrapper(RedirectBase):
 
 
 class StreamRawWrapper(RedirectBase):
-    """
-    Patches the write method of current sys.stdout/sys.stderr
+    """Patches the write method of current sys.stdout/sys.stderr.
 
     Captures data in a raw form rather than using the emulator
     """
@@ -697,7 +697,7 @@ class _WindowSizeChangeHandler:
             win_size = fcntl.ioctl(0, termios.TIOCGWINSZ, "\0" * 8)
             rows, cols, xpix, ypix = struct.unpack("HHHH", win_size)
         # Note: IOError not subclass of OSError in python 2.x
-        except OSError:  # eg. in MPI we can't do this. # noqa
+        except OSError:  # eg. in MPI we can't do this.
             return
         if cols == 0:
             return
@@ -710,9 +710,7 @@ _WSCH = _WindowSizeChangeHandler()
 
 
 class Redirect(RedirectBase):
-    """
-    Redirects low level file descriptors.
-    """
+    """Redirect low level file descriptors."""
 
     def __init__(self, src, cbs=()):
         super().__init__(src=src, cbs=cbs)

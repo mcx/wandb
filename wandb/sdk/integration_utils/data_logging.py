@@ -44,7 +44,7 @@ class ValidationDataLogger:
         class_labels: Optional[List[str]] = None,
         infer_missing_processors: bool = True,
     ) -> None:
-        """Initializes a new ValidationDataLogger.
+        """Initialize a new ValidationDataLogger.
 
         Args:
             inputs: A list of input vectors or dictionary of lists of input vectors
@@ -78,13 +78,13 @@ class ValidationDataLogger:
                 Defaults to `"wb_validation_data"`.
             artifact_type: The artifact type to use for the validation data.
                 Defaults to `"validation_dataset"`.
-            class_labels: Optional list of lables to use in the inferred
+            class_labels: Optional list of labels to use in the inferred
                 processors. If the model's `target` or `output` is inferred to be a class,
                 we will attempt to map the class to these labels. Defaults to `None`.
             infer_missing_processors: Determines if processors are inferred if
                 they are missing. Defaults to True.
         """
-        class_labels_table: Optional["wandb.Table"]
+        class_labels_table: Optional[wandb.Table]
         if isinstance(class_labels, list) and len(class_labels) > 0:
             class_labels_table = wandb.Table(
                 columns=["label"], data=[[label] for label in class_labels]
@@ -143,7 +143,7 @@ class ValidationDataLogger:
     def make_predictions(
         self, predict_fn: Callable
     ) -> Union[Sequence, Dict[str, Sequence]]:
-        """Produces predictions by passing `validation_inputs` to `predict_fn`.
+        """Produce predictions by passing `validation_inputs` to `predict_fn`.
 
         Args:
             predict_fn (Callable): Any function which can accept `validation_inputs` and produce
@@ -162,7 +162,7 @@ class ValidationDataLogger:
         table_name: str = "validation_predictions",
         commit: bool = True,
     ) -> wandb.data_types.Table:
-        """Logs a set of predictions.
+        """Log a set of predictions.
 
         Intended usage:
 
@@ -221,9 +221,9 @@ def _make_example(data: Any) -> Optional[Union[Dict, Sequence, Any]]:
 
 
 def _get_example_shape(example: Union[Sequence, Any]):
-    """Gets the shape of an object if applicable."""
+    """Get the shape of an object if applicable."""
     shape = []
-    if type(example) is not str and hasattr(example, "__len__"):
+    if not isinstance(example, str) and hasattr(example, "__len__"):
         length = len(example)
         shape = [length]
         if length > 0:
@@ -232,7 +232,7 @@ def _get_example_shape(example: Union[Sequence, Any]):
 
 
 def _bind(lambda_fn: Callable, **closure_kwargs: Any) -> Callable:
-    """Creates a closure around a lambda function by binding `closure_kwargs` to the function."""
+    """Create a closure around a lambda function by binding `closure_kwargs` to the function."""
 
     def closure(*args: Any, **kwargs: Any) -> Any:
         _k = {}
@@ -262,7 +262,7 @@ def _infer_single_example_keyed_processor(
     ):
         np = wandb.util.get_module(
             "numpy",
-            required="Infering processors require numpy",
+            required="Inferring processors require numpy",
         )
         # Assume these are logits
         class_names = class_labels_table.get_column("label")
@@ -291,13 +291,17 @@ def _infer_single_example_keyed_processor(
     ):
         # assume this is a class
         if class_labels_table is not None:
-            processors["class"] = lambda n, d, p: class_labels_table.index_ref(d[0]) if d[0] < len(class_labels_table.data) else d[0]  # type: ignore
+            processors["class"] = (
+                lambda n, d, p: class_labels_table.index_ref(d[0])
+                if d[0] < len(class_labels_table.data)
+                else d[0]
+            )  # type: ignore
         else:
             processors["val"] = lambda n, d, p: d[0]
     elif len(shape) == 1:
         np = wandb.util.get_module(
             "numpy",
-            required="Infering processors require numpy",
+            required="Inferring processors require numpy",
         )
         # This could be anything
         if shape[0] <= 10:
@@ -350,7 +354,7 @@ def _infer_validation_row_processor(
     input_col_name: str = "input",
     target_col_name: str = "target",
 ) -> Callable:
-    """Infers the composit processor for the validation data."""
+    """Infers the composite processor for the validation data."""
     single_processors = {}
     if isinstance(example_input, dict):
         for key in example_input:
@@ -427,7 +431,7 @@ def _infer_prediction_row_processor(
     input_col_name: str = "input",
     output_col_name: str = "output",
 ) -> Callable:
-    """Infers the composit processor for the prediction output data."""
+    """Infers the composite processor for the prediction output data."""
     single_processors = {}
 
     if isinstance(example_prediction, dict):

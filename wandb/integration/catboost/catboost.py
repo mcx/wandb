@@ -1,6 +1,4 @@
-"""
-catboost init
-"""
+"""catboost init."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +13,7 @@ from wandb.sdk.lib import telemetry as wb_telemetry
 class WandbCallback:
     """`WandbCallback` automatically integrates CatBoost with wandb.
 
-    Arguments:
+    Args:
         - metric_period: (int) if you are passing `metric_period` to your CatBoost model please pass the same value here (default=1).
 
     Passing `WandbCallback` to CatBoost will:
@@ -65,9 +63,7 @@ class WandbCallback:
 def _checkpoint_artifact(
     model: Union[CatBoostClassifier, CatBoostRegressor], aliases: List[str]
 ) -> None:
-    """
-    Upload model checkpoint as W&B artifact
-    """
+    """Upload model checkpoint as W&B artifact."""
     if wandb.run is None:
         raise wandb.Error(
             "You must call `wandb.init()` before `_checkpoint_artifact()`"
@@ -85,11 +81,9 @@ def _checkpoint_artifact(
 
 
 def _log_feature_importance(
-    model: Union[CatBoostClassifier, CatBoostRegressor]
+    model: Union[CatBoostClassifier, CatBoostRegressor],
 ) -> None:
-    """
-    Log feature importance with default settings.
-    """
+    """Log feature importance with default settings."""
     if wandb.run is None:
         raise wandb.Error(
             "You must call `wandb.init()` before `_checkpoint_artifact()`"
@@ -119,9 +113,9 @@ def log_summary(
     save_model_checkpoint: bool = False,
     log_feature_importance: bool = True,
 ) -> None:
-    """`log_summary` logs useful metrics about catboost model after training is done
+    """`log_summary` logs useful metrics about catboost model after training is done.
 
-    Arguments:
+    Args:
         model: it can be CatBoostClassifier or CatBoostRegressor.
         log_all_params: (boolean) if True (default) log the model hyperparameters as W&B config.
         save_model_checkpoint: (boolean) if True saves the model upload as W&B artifacts.
@@ -136,13 +130,13 @@ def log_summary(
 
     Example:
         ```python
-        train_pool = Pool(train[features], label=train['label'], cat_features=cat_features)
-        test_pool = Pool(test[features], label=test['label'], cat_features=cat_features)
+        train_pool = Pool(train[features], label=train["label"], cat_features=cat_features)
+        test_pool = Pool(test[features], label=test["label"], cat_features=cat_features)
 
         model = CatBoostRegressor(
             iterations=100,
-            loss_function='Cox',
-            eval_metric='Cox',
+            loss_function="Cox",
+            eval_metric="Cox",
         )
 
         model.fit(

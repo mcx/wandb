@@ -6,9 +6,10 @@ from wandb import util
 from .base_types.wb_value import WBValue
 
 if TYPE_CHECKING:  # pragma: no cover
-    import numpy as np  # type: ignore
+    import numpy as np
 
-    from ..wandb_artifacts import Artifact as LocalArtifact
+    from wandb.sdk.artifacts.artifact import Artifact
+
     from ..wandb_run import Run as LocalRun
 
     NumpyHistogram = Tuple[np.ndarray, np.ndarray]
@@ -23,7 +24,7 @@ class Histogram(WBValue):
     Examples:
         Generate histogram from a sequence
         ```python
-        wandb.Histogram([1,2,3])
+        wandb.Histogram([1, 2, 3])
         ```
 
         Efficiently initialize from np.histogram.
@@ -32,7 +33,7 @@ class Histogram(WBValue):
         wandb.Histogram(np_histogram=hist)
         ```
 
-    Arguments:
+    Args:
         sequence: (array_like) input data for histogram
         np_histogram: (numpy histogram) alternative input of a precomputed histogram
         num_bins: (int) Number of bins for the histogram.  The default number of bins
@@ -52,7 +53,6 @@ class Histogram(WBValue):
         np_histogram: Optional["NumpyHistogram"] = None,
         num_bins: int = 64,
     ) -> None:
-
         if np_histogram:
             if len(np_histogram) == 2:
                 self.histogram = (
@@ -74,21 +74,21 @@ class Histogram(WBValue):
                 "numpy", required="Auto creation of histograms requires numpy"
             )
 
-            self.histogram, self.bins = np.histogram(sequence, bins=num_bins)
-            self.histogram = self.histogram.tolist()
-            self.bins = self.bins.tolist()
+            histogram, bins = np.histogram(sequence, bins=num_bins)
+            self.histogram = histogram.tolist()
+            self.bins = bins.tolist()
         if len(self.histogram) > self.MAX_LENGTH:
-            raise ValueError(
-                "The maximum length of a histogram is %i" % self.MAX_LENGTH
-            )
+            raise ValueError(f"The maximum length of a histogram is {self.MAX_LENGTH}")
         if len(self.histogram) + 1 != len(self.bins):
             raise ValueError("len(bins) must be len(histogram) + 1")
 
-    def to_json(self, run: Optional[Union["LocalRun", "LocalArtifact"]] = None) -> dict:
+    def to_json(self, run: Optional[Union["LocalRun", "Artifact"]] = None) -> dict:
         return {"_type": self._log_type, "values": self.histogram, "bins": self.bins}
 
     def __sizeof__(self) -> int:
-        """This returns an estimated size in bytes, currently the factor of 1.7
-        is used to account for the JSON encoding.  We use this in tb_watcher.TBHistory
+        """Estimated size in bytes.
+
+        Currently the factor of 1.7 is used to account for the JSON encoding. We use
+        this in tb_watcher.TBHistory.
         """
         return int((sys.getsizeof(self.histogram) + sys.getsizeof(self.bins)) * 1.7)

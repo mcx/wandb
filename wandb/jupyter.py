@@ -5,18 +5,19 @@ import re
 import shutil
 import sys
 from base64 import b64encode
+from typing import Dict
 
 import requests
 from requests.compat import urljoin
 
 import wandb
+import wandb.util
 from wandb.sdk.lib import filesystem
 
 try:
-    from IPython.core.getipython import get_ipython
+    import IPython
     from IPython.core.magic import Magics, line_cell_magic, magics_class
     from IPython.core.magic_arguments import argument, magic_arguments, parse_argstring
-    from IPython.display import display
 except ImportError:
     wandb.termwarn("ipython is not supported in python 2.7, upgrade to 3.x")
 
@@ -42,7 +43,7 @@ __IFrame = None
 
 
 def maybe_display():
-    """Display a run if the user added cell magic and we have run"""
+    """Display a run if the user added cell magic and we have run."""
     if __IFrame is not None:
         return __IFrame.maybe_display()
     return False
@@ -64,7 +65,7 @@ class IFrame:
 
     def maybe_display(self) -> bool:
         if not self.displayed and (self.path or wandb.run):
-            display(self)
+            IPython.display.display(self)
         return self.displayed
 
     def _repr_html_(self):
@@ -153,7 +154,7 @@ class WandBMagics(Magics):
                     + cell
                     + "\nwandb.jupyter.__IFrame = None"
                 )
-            get_ipython().run_cell(cell)
+            IPython.get_ipython().run_cell(cell)
 
 
 def notebook_metadata_from_jupyter_servers_and_kernel_id():
@@ -165,8 +166,6 @@ def notebook_metadata_from_jupyter_servers_and_kernel_id():
             urljoin(s["url"], "api/sessions"), params={"token": s.get("token", "")}
         ).json()
         for nn in res:
-            # TODO: wandb/client#400 found a case where res returned an array of
-            # strings...
             if isinstance(nn, dict) and nn.get("kernel") and "notebook" in nn:
                 if nn["kernel"]["id"] == kernel_id:
                     return {
@@ -174,13 +173,30 @@ def notebook_metadata_from_jupyter_servers_and_kernel_id():
                         "path": nn["notebook"]["path"],
                         "name": nn["notebook"]["name"],
                     }
-    return None
+
+    if not kernel_id:
+        return None
+
+    # Built-in notebook server in VS Code
+    try:
+        from IPython import get_ipython
+
+        ipython = get_ipython()
+        notebook_path = ipython.kernel.shell.user_ns.get("__vsc_ipynb_file__")
+        if notebook_path:
+            return {
+                "root": os.path.dirname(notebook_path),
+                "path": notebook_path,
+                "name": os.path.basename(notebook_path),
+            }
+    except Exception:
+        return None
 
 
-def notebook_metadata(silent):
-    """Attempts to query jupyter for the path and name of the notebook file.
+def notebook_metadata(silent: bool) -> Dict[str, str]:
+    """Attempt to query jupyter for the path and name of the notebook file.
 
-    This can handle many different jupyter environments, specifically:
+    This can handle different jupyter environments, specifically:
 
     1. Colab
     2. Kaggle
@@ -193,30 +209,21 @@ def notebook_metadata(silent):
         "the WANDB_NOTEBOOK_NAME environment variable to enable code saving."
     )
     try:
-        # In colab we can request the most recent contents
+        jupyter_metadata = notebook_metadata_from_jupyter_servers_and_kernel_id()
+
+        # Colab:
+        # request the most recent contents
         ipynb = attempt_colab_load_ipynb()
-        if ipynb:
-            nb_name = ipynb["metadata"]["colab"]["name"]
-            if ".ipynb" not in nb_name:
-                nb_name += ".ipynb"
-            ret = {
+        if ipynb is not None and jupyter_metadata is not None:
+            return {
                 "root": "/content",
-                "path": nb_name,
-                "name": nb_name,
+                "path": jupyter_metadata["path"],
+                "name": jupyter_metadata["name"],
             }
 
-            try:
-                jupyter_metadata = (
-                    notebook_metadata_from_jupyter_servers_and_kernel_id()
-                )
-            except RuntimeError:
-                pass
-            else:
-                ret["path"] = jupyter_metadata["path"]
-            return ret
-
+        # Kaggle:
         if wandb.util._is_kaggle():
-            # In kaggle we can request the most recent contents
+            # request the most recent contents
             ipynb = attempt_kaggle_load_ipynb()
             if ipynb:
                 return {
@@ -225,7 +232,6 @@ def notebook_metadata(silent):
                     "name": ipynb["metadata"]["name"],
                 }
 
-        jupyter_metadata = notebook_metadata_from_jupyter_servers_and_kernel_id()
         if jupyter_metadata:
             return jupyter_metadata
         if not silent:
@@ -241,8 +247,10 @@ def notebook_metadata(silent):
 
 
 def jupyter_servers_and_kernel_id():
-    """Returns a list of servers and the current kernel_id so we can query for
-    the name of the notebook"""
+    """Return a list of servers and the current kernel_id.
+
+    Used to query for the name of the notebook.
+    """
     try:
         import ipykernel
 
@@ -286,7 +294,7 @@ def attempt_kaggle_load_ipynb():
 
 
 def attempt_colab_login(app_url):
-    """This renders an iframe to wandb in the hopes it posts back an api key"""
+    """This renders an iframe to wandb in the hopes it posts back an api key."""
     from google.colab import output
     from google.colab._message import MessageError
     from IPython import display
@@ -294,35 +302,34 @@ def attempt_colab_login(app_url):
     display.display(
         display.Javascript(
             """
-        window._wandbApiKey = new Promise((resolve, reject) => {
-            function loadScript(url) {
-            return new Promise(function(resolve, reject) {
+        window._wandbApiKey = new Promise((resolve, reject) => {{
+            function loadScript(url) {{
+            return new Promise(function(resolve, reject) {{
                 let newScript = document.createElement("script");
                 newScript.onerror = reject;
                 newScript.onload = resolve;
                 document.body.appendChild(newScript);
                 newScript.src = url;
-            });
-            }
-            loadScript("https://cdn.jsdelivr.net/npm/postmate/build/postmate.min.js").then(() => {
+            }});
+            }}
+            loadScript("https://cdn.jsdelivr.net/npm/postmate/build/postmate.min.js").then(() => {{
             const iframe = document.createElement('iframe')
             iframe.style.cssText = "width:0;height:0;border:none"
             document.body.appendChild(iframe)
-            const handshake = new Postmate({
+            const handshake = new Postmate({{
                 container: iframe,
-                url: '%s/authorize'
-            });
+                url: '{}/authorize'
+            }});
             const timeout = setTimeout(() => reject("Couldn't auto authenticate"), 5000)
-            handshake.then(function(child) {
-                child.on('authorize', data => {
+            handshake.then(function(child) {{
+                child.on('authorize', data => {{
                     clearTimeout(timeout)
                     resolve(data)
-                });
-            });
-            })
-        });
-    """  # noqa: E501
-            % app_url.replace("http:", "https:")
+                }});
+            }});
+            }})
+        }});
+    """.format(app_url.replace("http:", "https:"))
         )
     )
     try:
@@ -335,7 +342,7 @@ class Notebook:
     def __init__(self, settings):
         self.outputs = {}
         self.settings = settings
-        self.shell = get_ipython()
+        self.shell = IPython.get_ipython()
 
     def save_display(self, exc_count, data_with_metadata):
         self.outputs[exc_count] = self.outputs.get(exc_count, [])
@@ -357,7 +364,7 @@ class Notebook:
 
     def probe_ipynb(self):
         """Return notebook as dict or None."""
-        relpath = self.settings._jupyter_path
+        relpath = self.settings.x_jupyter_path
         if relpath:
             if os.path.exists(relpath):
                 with open(relpath) as json_file:
@@ -386,7 +393,7 @@ class Notebook:
         return ret
 
     def _save_ipynb(self) -> bool:
-        relpath = self.settings._jupyter_path
+        relpath = self.settings.x_jupyter_path
         logger.info("looking for notebook: %s", relpath)
         if relpath:
             if os.path.exists(relpath):
@@ -401,12 +408,14 @@ class Notebook:
         # TODO: likely only save if the code has changed
         colab_ipynb = attempt_colab_load_ipynb()
         if colab_ipynb:
-            nb_name = (
-                colab_ipynb.get("metadata", {})
-                .get("colab", {})
-                .get("name", "colab.ipynb")
-            )
-            if ".ipynb" not in nb_name:
+            try:
+                jupyter_metadata = (
+                    notebook_metadata_from_jupyter_servers_and_kernel_id()
+                )
+                nb_name = jupyter_metadata["name"]
+            except Exception:
+                nb_name = "colab.ipynb"
+            if not nb_name.endswith(".ipynb"):
                 nb_name += ".ipynb"
             with open(
                 os.path.join(
@@ -434,7 +443,7 @@ class Notebook:
         return False
 
     def save_history(self):
-        """This saves all cell executions in the current session as a new notebook"""
+        """This saves all cell executions in the current session as a new notebook."""
         try:
             from nbformat import v4, validator, write
         except ImportError:
@@ -480,8 +489,8 @@ class Notebook:
                 cells=cells,
                 metadata={
                     "kernelspec": {
-                        "display_name": "Python %i" % sys.version_info[0],
-                        "name": "python%i" % sys.version_info[0],
+                        "display_name": f"Python {sys.version_info[0]}",
+                        "name": f"python{sys.version_info[0]}",
                         "language": "python",
                     },
                     "language_info": language_info,
@@ -502,4 +511,3 @@ class Notebook:
                 write(nb, f, version=4)
         except (OSError, validator.NotebookValidationError) as e:
             logger.error("Unable to save ipython session history:\n%s", e)
-            pass

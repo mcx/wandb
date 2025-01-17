@@ -1,25 +1,31 @@
 import logging
 import sys
-from typing import Optional
+import warnings
+from typing import Literal, Optional
 
 import wandb
+
+PythonType = Literal["python", "ipython", "jupyter"]
 
 logger = logging.getLogger(__name__)
 
 
-TABLE_STYLES = """<style>
-    table.wandb td:nth-child(1) { padding: 0 10px; text-align: left ; width: auto;} td:nth-child(2) {text-align: left ; width: 100%}
-    .wandb-row { display: flex; flex-direction: row; flex-wrap: wrap; justify-content: flex-start; width: 100% }
-    .wandb-col { display: flex; flex-direction: column; flex-basis: 100%; flex: 1; padding: 10px; }
-    </style>
-"""
-
-
 def toggle_button(what="run"):
-    return f"<button onClick=\"this.nextSibling.style.display='block';this.style.display='none';\">Display W&B {what}</button>"
+    """Returns the HTML for a button used to reveal the element following it.
+
+    The element immediately after the button must have `display: none`.
+    """
+    return (
+        "<button onClick=\"this.nextSibling.style.display='block';this.style.display='none';\">"
+        f"Display W&B {what}"
+        "</button>"
+    )
 
 
-def _get_python_type():
+def _get_python_type() -> PythonType:
+    if "IPython" not in sys.modules:
+        return "python"
+
     try:
         from IPython import get_ipython  # type: ignore
 
@@ -28,46 +34,51 @@ def _get_python_type():
             return "python"
     except ImportError:
         return "python"
-    if "terminal" in get_ipython().__module__ or "spyder" in sys.modules:
+
+    # jupyter-based environments (e.g. jupyter itself, colab, kaggle, etc) have a connection file
+    ip_kernel_app_connection_file = (
+        (get_ipython().config.get("IPKernelApp", {}) or {})
+        .get("connection_file", "")
+        .lower()
+    ) or (
+        (get_ipython().config.get("ColabKernelApp", {}) or {})
+        .get("connection_file", "")
+        .lower()
+    )
+
+    if (
+        ("terminal" in get_ipython().__module__)
+        or ("jupyter" not in ip_kernel_app_connection_file)
+        or ("spyder" in sys.modules)
+    ):
         return "ipython"
     else:
         return "jupyter"
 
 
 def in_jupyter() -> bool:
+    """Returns True if we're in a Jupyter notebook."""
     return _get_python_type() == "jupyter"
 
 
-def display_html(html: str):  # type: ignore
-    """Displays HTML in notebooks, is a noop outside of a jupyter context"""
-    if wandb.run and wandb.run._settings.silent:
-        return
-    try:
-        from IPython.core.display import HTML, display  # type: ignore
-    except ImportError:
-        wandb.termwarn("Unable to render HTML, can't import display from ipython.core")
-        return False
-    return display(HTML(html))
+def in_ipython() -> bool:
+    """Returns True if we're running in IPython in the terminal."""
+    return _get_python_type() == "ipython"
 
 
-def display_widget(widget):
-    """Displays ipywidgets in notebooks, is a noop outside of a jupyter context"""
-    if wandb.run and wandb.run._settings.silent:
-        return
-    try:
-        from IPython.core.display import display
-    except ImportError:
-        wandb.termwarn(
-            "Unable to render Widget, can't import display from ipython.core"
-        )
-        return False
-    return display(widget)
+def in_notebook() -> bool:
+    """Returns True if we're running in Jupyter or IPython."""
+    return _get_python_type() != "python"
 
 
 class ProgressWidget:
-    """A simple wrapper to render a nice progress bar with a label"""
+    """A simple wrapper to render a nice progress bar with a label."""
 
     def __init__(self, widgets, min, max):
+        from IPython import display
+
+        self._ipython_display = display
+
         self.widgets = widgets
         self._progress = widgets.FloatProgress(min=min, max=max)
         self._label = widgets.Label()
@@ -83,7 +94,7 @@ class ProgressWidget:
             self._label.value = label
             if not self._displayed:
                 self._displayed = True
-                display_widget(self._widget)
+                self._ipython_display.display(self._widget)
         except Exception as e:
             self._disabled = True
             logger.exception(e)
@@ -98,12 +109,14 @@ class ProgressWidget:
 
 
 def jupyter_progress_bar(min: float = 0, max: float = 1.0) -> Optional[ProgressWidget]:
-    """Returns an ipywidget progress bar or None if we can't import it"""
+    """Return an ipywidget progress bar or None if we can't import it."""
     widgets = wandb.util.get_module("ipywidgets")
     try:
         if widgets is None:
             # TODO: this currently works in iPython but it's deprecated since 4.0
-            from IPython.html import widgets  # type: ignore
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                from IPython.html import widgets  # type: ignore
 
         assert hasattr(widgets, "VBox")
         assert hasattr(widgets, "Label")

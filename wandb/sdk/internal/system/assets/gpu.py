@@ -1,5 +1,5 @@
 import logging
-import multiprocessing as mp
+import threading
 from collections import deque
 from typing import TYPE_CHECKING, List
 
@@ -32,7 +32,7 @@ def gpu_in_use_by_this_process(gpu_handle: "GPUHandle", pid: int) -> bool:
     try:
         base_process = psutil.Process(pid=pid)
     except psutil.NoSuchProcess:
-        # do not report any gpu metrics if the base process cant be found
+        # do not report any gpu metrics if the base process can't be found
         return False
 
     our_processes = base_process.children(recursive=True)
@@ -55,9 +55,7 @@ def gpu_in_use_by_this_process(gpu_handle: "GPUHandle", pid: int) -> bool:
 
 
 class GPUMemoryUtilization:
-    """
-    GPU memory utilization in percent for each GPU.
-    """
+    """GPU memory utilization in percent for each GPU."""
 
     # name = "memory_utilization"
     name = "gpu.{}.memory"
@@ -99,9 +97,7 @@ class GPUMemoryUtilization:
 
 
 class GPUMemoryAllocated:
-    """
-    GPU memory allocated in percent for each GPU.
-    """
+    """GPU memory allocated in percent for each GPU."""
 
     # name = "memory_allocated"
     name = "gpu.{}.memoryAllocated"
@@ -141,10 +137,49 @@ class GPUMemoryAllocated:
         return stats
 
 
+class GPUMemoryAllocatedBytes:
+    """GPU memory allocated in bytes for each GPU."""
+
+    # name = "memory_allocated"
+    name = "gpu.{}.memoryAllocatedBytes"
+    # samples: Deque[Tuple[datetime.datetime, float]]
+    samples: "Deque[List[float]]"
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.samples = deque([])
+
+    def sample(self) -> None:
+        memory_allocated = []
+        device_count = pynvml.nvmlDeviceGetCount()  # type: ignore
+        for i in range(device_count):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)  # type: ignore
+            memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)  # type: ignore
+            memory_allocated.append(memory_info.used)
+        self.samples.append(memory_allocated)
+
+    def clear(self) -> None:
+        self.samples.clear()
+
+    def aggregate(self) -> dict:
+        if not self.samples:
+            return {}
+        stats = {}
+        device_count = pynvml.nvmlDeviceGetCount()  # type: ignore
+        for i in range(device_count):
+            samples = [sample[i] for sample in self.samples]
+            aggregate = aggregate_mean(samples)
+            stats[self.name.format(i)] = aggregate
+
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)  # type: ignore
+            if gpu_in_use_by_this_process(handle, self.pid):
+                stats[self.name.format(f"process.{i}")] = aggregate
+
+        return stats
+
+
 class GPUUtilization:
-    """
-    GPU utilization in percent for each GPU.
-    """
+    """GPU utilization in percent for each GPU."""
 
     # name = "gpu_utilization"
     name = "gpu.{}.gpu"
@@ -186,9 +221,7 @@ class GPUUtilization:
 
 
 class GPUTemperature:
-    """
-    GPU temperature in Celsius for each GPU.
-    """
+    """GPU temperature in Celsius for each GPU."""
 
     # name = "gpu_temperature"
     name = "gpu.{}.temp"
@@ -233,9 +266,7 @@ class GPUTemperature:
 
 
 class GPUPowerUsageWatts:
-    """
-    GPU power usage in Watts for each GPU.
-    """
+    """GPU power usage in Watts for each GPU."""
 
     name = "gpu.{}.powerWatts"
     # samples: Deque[Tuple[datetime.datetime, float]]
@@ -273,9 +304,7 @@ class GPUPowerUsageWatts:
 
 
 class GPUPowerUsagePercent:
-    """
-    GPU power usage in percent for each GPU.
-    """
+    """GPU power usage in percent for each GPU."""
 
     name = "gpu.{}.powerPercent"
     # samples: Deque[Tuple[datetime.datetime, float]]
@@ -321,16 +350,17 @@ class GPU:
         self,
         interface: "Interface",
         settings: "SettingsStatic",
-        shutdown_event: mp.synchronize.Event,
+        shutdown_event: threading.Event,
     ) -> None:
         self.name = self.__class__.__name__.lower()
         self.metrics: List[Metric] = [
-            GPUMemoryAllocated(settings._stats_pid),
-            GPUMemoryUtilization(settings._stats_pid),
-            GPUUtilization(settings._stats_pid),
-            GPUTemperature(settings._stats_pid),
-            GPUPowerUsageWatts(settings._stats_pid),
-            GPUPowerUsagePercent(settings._stats_pid),
+            GPUMemoryAllocated(settings.x_stats_pid),
+            GPUMemoryAllocatedBytes(settings.x_stats_pid),
+            GPUMemoryUtilization(settings.x_stats_pid),
+            GPUUtilization(settings.x_stats_pid),
+            GPUTemperature(settings.x_stats_pid),
+            GPUPowerUsageWatts(settings.x_stats_pid),
+            GPUPowerUsagePercent(settings.x_stats_pid),
         ]
         self.metrics_monitor = MetricsMonitor(
             self.name,
@@ -380,5 +410,7 @@ class GPU:
 
         except pynvml.NVMLError:
             pass
+        except Exception as e:
+            logger.error(f"Error Probing GPU: {e}")
 
         return info

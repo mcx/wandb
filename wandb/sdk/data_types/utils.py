@@ -1,6 +1,8 @@
+import datetime
 import logging
 import os
 import re
+from decimal import Decimal
 from typing import TYPE_CHECKING, Optional, Sequence, Union, cast
 
 import wandb
@@ -13,7 +15,7 @@ from .plotly import Plotly
 
 if TYPE_CHECKING:  # pragma: no cover
     import matplotlib  # type: ignore
-    import pandas as pd  # type: ignore
+    import pandas as pd
     import plotly  # type: ignore
 
     from ..wandb_run import Run as LocalRun
@@ -71,6 +73,12 @@ def val_to_json(
         )
 
     converted = val
+
+    if isinstance(val, (int, float, str, bool)):
+        # These are already JSON-serializable,
+        # no need to do the expensive checks below.
+        return converted  # type: ignore[return-value]
+
     typename = util.get_full_typename(val)
 
     if util.is_pandas_data_frame(val):
@@ -78,7 +86,9 @@ def val_to_json(
 
     elif util.is_matplotlib_typename(typename) or util.is_plotly_typename(typename):
         val = Plotly.make_plot_media(val)
-    elif isinstance(val, Sequence) and all(isinstance(v, WBValue) for v in val):
+    elif isinstance(val, (list, tuple, range)) and all(
+        isinstance(v, WBValue) for v in val
+    ):
         assert run
         # This check will break down if Image/Audio/... have child classes.
         if (
@@ -86,7 +96,6 @@ def val_to_json(
             and isinstance(val[0], BatchableMedia)
             and all(isinstance(v, type(val[0])) for v in val)
         ):
-
             if TYPE_CHECKING:
                 val = cast(Sequence["BatchableMedia"], val)
 
@@ -121,7 +130,7 @@ def val_to_json(
             # the array index?
             # There is a bug here: if this array contains two arrays of the same type of
             # anonymous media objects, their eventual names will collide.
-            # This used to happen. The frontend doesn't handle heterogenous arrays
+            # This used to happen. The frontend doesn't handle heterogeneous arrays
             # raise ValueError(
             #    "Mixed media types in the same list aren't supported")
             return [
@@ -139,16 +148,9 @@ def val_to_json(
                 "partitioned-table",
                 "joined-table",
             ]:
-
-                # Special conditional to log tables as artifact entries as well.
-                # I suspect we will generalize this as we transition to storing all
-                # files in an artifact
-                # we sanitize the key to meet the constraints defined in wandb_artifacts.py
-                # in this case, leaving only alpha numerics or underscores.
-                sanitized_key = re.sub(r"[^a-zA-Z0-9_]+", "", key)
-                art = wandb.wandb_sdk.wandb_artifacts.Artifact(
-                    f"run-{run.id}-{sanitized_key}", "run_table"
-                )
+                # Sanitize the key to meet the constraints of artifact names.
+                sanitized_key = re.sub(r"[^a-zA-Z0-9_\-.]+", "", key)
+                art = wandb.Artifact(f"run-{run.id}-{sanitized_key}", "run_table")
                 art.add(val, key)
                 run.log_artifact(art)
 
@@ -169,8 +171,54 @@ def _prune_max_seq(seq: Sequence["BatchableMedia"]) -> Sequence["BatchableMedia"
     items = seq
     if hasattr(seq[0], "MAX_ITEMS") and seq[0].MAX_ITEMS < len(seq):
         logging.warning(
-            "Only %i %s will be uploaded."
-            % (seq[0].MAX_ITEMS, seq[0].__class__.__name__)
+            f"Only {seq[0].MAX_ITEMS} {seq[0].__class__.__name__} will be uploaded."
         )
         items = seq[: seq[0].MAX_ITEMS]
     return items
+
+
+def _json_helper(val, artifact):
+    if isinstance(val, WBValue):
+        return val.to_json(artifact)
+    elif val.__class__ is dict:
+        res = {}
+        for key in val:
+            res[key] = _json_helper(val[key], artifact)
+        return res
+
+    if hasattr(val, "tolist"):
+        py_val = val.tolist()
+        if val.__class__.__name__ == "datetime64" and isinstance(py_val, int):
+            # when numpy datetime64 .tolist() returns an int, it is nanoseconds.
+            # need to convert to milliseconds
+            return _json_helper(py_val / int(1e6), artifact)
+        return _json_helper(py_val, artifact)
+    elif hasattr(val, "item"):
+        return _json_helper(val.item(), artifact)
+
+    if isinstance(val, datetime.datetime):
+        if val.tzinfo is None:
+            val = datetime.datetime(
+                val.year,
+                val.month,
+                val.day,
+                val.hour,
+                val.minute,
+                val.second,
+                val.microsecond,
+                tzinfo=datetime.timezone.utc,
+            )
+        return int(val.timestamp() * 1000)
+    elif isinstance(val, datetime.date):
+        return int(
+            datetime.datetime(
+                val.year, val.month, val.day, tzinfo=datetime.timezone.utc
+            ).timestamp()
+            * 1000
+        )
+    elif isinstance(val, (list, tuple)):
+        return [_json_helper(i, artifact) for i in val]
+    elif isinstance(val, Decimal):
+        return float(val)
+    else:
+        return util.json_friendly(val)[0]

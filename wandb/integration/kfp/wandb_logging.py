@@ -3,7 +3,7 @@ def wandb_log(  # noqa: C901
     # /,  # py38 only
     log_component_file=True,
 ):
-    """Wrap a standard python function and log to W&B"""
+    """Wrap a standard python function and log to W&B."""
     import json
     import os
     from functools import wraps
@@ -30,12 +30,12 @@ def wandb_log(  # noqa: C901
     def isinstance_namedtuple(x):
         t = type(x)
         b = t.__bases__
-        if len(b) != 1 or b[0] != tuple:
+        if len(b) != 1 or b[0] is not tuple:
             return False
         f = getattr(t, "_fields", None)
         if not isinstance(f, tuple):
             return False
-        return all(type(n) == str for n in f)
+        return all(isinstance(n, str) for n in f)
 
     def get_iframe_html(run):
         return f'<iframe src="{run.url}?kfp=true" style="border:none;width:100%;height:100%;min-width:900px;min-height:600px;"></iframe>'
@@ -131,7 +131,6 @@ def wandb_log(  # noqa: C901
                 job_type=func.__name__,
                 group="{{workflow.annotations.pipelines.kubeflow.org/run_name}}",
             ) as run:
-
                 # Link back to the kfp UI
                 kubeflow_url = get_link_back_to_kubeflow()
                 run.notes = kubeflow_url

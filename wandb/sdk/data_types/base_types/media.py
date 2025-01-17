@@ -9,33 +9,98 @@ import wandb
 from wandb import util
 from wandb._globals import _datatypes_callback
 from wandb.sdk.lib import filesystem
+from wandb.sdk.lib.paths import LogicalPath
 
 from .wb_value import WBValue
 
 if TYPE_CHECKING:  # pragma: no cover
-    import numpy as np  # type: ignore
+    import numpy as np
 
-    from wandb.apis.public import Artifact as PublicArtifact
+    from wandb.sdk.artifacts.artifact import Artifact
 
-    from ...wandb_artifacts import Artifact as LocalArtifact
     from ...wandb_run import Run as LocalRun
 
 
 SYS_PLATFORM = platform.system()
 
 
+def check_windows_valid_filename(path: Union[int, str]) -> bool:
+    r"""Verify that the given path does not contain any invalid characters for a Windows filename.
+
+    Windows filenames cannot contain the following characters:
+    < > : " \ / | ? *
+
+    For more details, refer to the official documentation:
+    https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file#naming-conventions
+
+    Args:
+        path: The file path to check, which can be either an integer or a string.
+
+    Returns:
+        bool: True if the path does not contain any invalid characters, False otherwise.
+    """
+    return not bool(re.search(r'[<>:"\\?*]', path))  # type: ignore
+
+
 def _wb_filename(
     key: Union[str, int], step: Union[str, int], id: Union[str, int], extension: str
 ) -> str:
+    r"""Generates a safe filename/path for storing media files, using the provided key, step, and id.
+
+    The filename is made safe by:
+    1. Removing any leading slashes to prevent writing to absolute paths
+    2. Replacing '.' and '..' with underscores to prevent directory traversal attacks
+
+    If the key contains slashes (e.g. 'images/cats/fluffy.jpg'), subdirectories will be created:
+        media/
+          images/
+            cats/
+              fluffy.jpg_step_id.ext
+
+    Args:
+        key: Name/path for the media file
+        step: Training step number
+        id: Unique identifier
+        extension: File extension (e.g. '.jpg', '.mp3')
+
+    Returns:
+        A sanitized filename string in the format: key_step_id.extension
+
+    Raises:
+        ValueError: If running on Windows and the key contains invalid filename characters
+                   (\\, :, *, ?, ", <, >, |)
+    """
+    if SYS_PLATFORM == "Windows" and not check_windows_valid_filename(key):
+        raise ValueError(
+            f'Media {key} is invalid. Please remove invalid filename characters (\\, :, *, ?, ", <, >, |)'
+        )
+
+    # On Windows, convert forward slashes to backslashes.
+    # This ensures that the key is a valid filename on Windows.
+    if SYS_PLATFORM == "Windows":
+        key = str(key).replace("/", os.sep)
+
+    # Avoid writing to absolute paths by striping any leading slashes.
+    # The key has already been validated for windows operating systems in util.check_windows_valid_filename
+    # This ensures the key does not contain invalid characters for windows, such as '\' or ':'.
+    # So we can check only for '/' in the key.
+    key = str(key).lstrip(os.sep)
+
+    # Avoid directory traversal by replacing dots with underscores.
+    keys = key.split(os.sep)
+    keys = [k.replace(".", "_") if k in (os.curdir, os.pardir) else k for k in keys]
+
+    # Recombine the key into a relative path.
+    key = os.sep.join(keys)
+
     return f"{str(key)}_{str(step)}_{str(id)}{extension}"
 
 
 class Media(WBValue):
-    """A WBValue that we store as a file outside JSON and show in a media panel
-    on the front end.
+    """A WBValue stored as a file outside JSON that can be rendered in a media panel.
 
-    If necessary, we move or copy the file into the Run's media directory so
-    that it gets uploaded.
+    If necessary, we move or copy the file into the Run's media directory so that it
+    gets uploaded.
     """
 
     _path: Optional[str]
@@ -61,9 +126,7 @@ class Media(WBValue):
         self._extension = extension
         assert extension is None or path.endswith(
             extension
-        ), 'Media file extension "{}" must occur at the end of path "{}".'.format(
-            extension, path
-        )
+        ), f'Media file extension "{extension}" must occur at the end of path "{path}".'
 
         with open(self._path, "rb") as f:
             self._sha256 = hashlib.sha256(f.read()).hexdigest()
@@ -98,16 +161,10 @@ class Media(WBValue):
     ) -> None:
         """Bind this object to a particular Run.
 
-        Calling this function is necessary so that we have somewhere specific to
-        put the file associated with this object, from which other Runs can
-        refer to it.
+        Calling this function is necessary so that we have somewhere specific to put the
+        file associated with this object, from which other Runs can refer to it.
         """
         assert self.file_is_set(), "bind_to_run called before _set_file"
-
-        if SYS_PLATFORM == "Windows" and not util.check_windows_valid_filename(key):
-            raise ValueError(
-                f"Media {key} is invalid. Please remove invalid filename characters"
-            )
 
         # The following two assertions are guaranteed to pass
         # by definition file_is_set, but are needed for
@@ -145,13 +202,16 @@ class Media(WBValue):
             self._path = new_path
             _datatypes_callback(media_path)
 
-    def to_json(self, run: Union["LocalRun", "LocalArtifact"]) -> dict:
-        """Serializes the object into a JSON blob, using a run or artifact to store additional data. If `run_or_artifact`
-        is a wandb.Run then `self.bind_to_run()` must have been previously been called.
+    def to_json(self, run: Union["LocalRun", "Artifact"]) -> dict:
+        """Serialize the object into a JSON blob.
+
+        Uses run or artifact to store additional data. If `run_or_artifact` is a
+        wandb.Run then `self.bind_to_run()` must have been previously been called.
 
         Args:
-            run_or_artifact (wandb.Run | wandb.Artifact): the Run or Artifact for which this object should be generating
-            JSON for - this is useful to to store additional data if needed.
+            run_or_artifact (wandb.Run | wandb.Artifact): the Run or Artifact for which
+                this object should be generating JSON for - this is useful to store
+                additional data if needed.
 
         Returns:
             dict: JSON representation
@@ -160,9 +220,11 @@ class Media(WBValue):
         # into Media itself we should get rid of them
         from wandb import Image
         from wandb.data_types import Audio
+        from wandb.sdk.wandb_run import Run
 
         json_obj = {}
-        if isinstance(run, wandb.wandb_sdk.wandb_run.Run):
+
+        if isinstance(run, Run):
             json_obj.update(
                 {
                     "_type": "file",  # TODO(adrian): This isn't (yet) a real media type we support on the frontend.
@@ -178,9 +240,7 @@ class Media(WBValue):
                 json_obj["_latest_artifact_path"] = artifact_entry_latest_url
 
             if artifact_entry_url is None or self.is_bound():
-                assert (
-                    self.is_bound()
-                ), "Value of type {} must be bound to a run with bind_to_run() before being serialized to JSON.".format(
+                assert self.is_bound(), "Value of type {} must be bound to a run with bind_to_run() before being serialized to JSON.".format(
                     type(self).__name__
                 )
 
@@ -192,11 +252,11 @@ class Media(WBValue):
                 # by definition is_bound, but are needed for
                 # mypy to understand that these are strings below.
                 assert isinstance(self._path, str)
-                json_obj["path"] = util.to_forward_slash_path(
+                json_obj["path"] = LogicalPath(
                     os.path.relpath(self._path, self._run.dir)
                 )
 
-        elif isinstance(run, wandb.wandb_sdk.wandb_artifacts.Artifact):
+        elif isinstance(run, wandb.Artifact):
             if self.file_is_set():
                 # The following two assertions are guaranteed to pass
                 # by definition of the call above, but are needed for
@@ -222,8 +282,7 @@ class Media(WBValue):
 
                     # if not, check to see if there is a source artifact for this object
                     if (
-                        self._artifact_source
-                        is not None
+                        self._artifact_source is not None
                         # and self._artifact_source.artifact != artifact
                     ):
                         default_root = self._artifact_source.artifact._default_root()
@@ -233,7 +292,7 @@ class Media(WBValue):
                             name = name.lstrip(os.sep)
 
                         # Add this image as a reference
-                        path = self._artifact_source.artifact.get_path(name)
+                        path = self._artifact_source.artifact.get_entry(name)
                         artifact.add_reference(path.ref_url(), name=name)
                     elif (
                         isinstance(self, Audio) or isinstance(self, Image)
@@ -252,13 +311,13 @@ class Media(WBValue):
 
     @classmethod
     def from_json(
-        cls: Type["Media"], json_obj: dict, source_artifact: "PublicArtifact"
+        cls: Type["Media"], json_obj: dict, source_artifact: "Artifact"
     ) -> "Media":
-        """Likely will need to override for any more complicated media objects"""
-        return cls(source_artifact.get_path(json_obj["path"]).download())
+        """Likely will need to override for any more complicated media objects."""
+        return cls(source_artifact.get_entry(json_obj["path"]).download())
 
     def __eq__(self, other: object) -> bool:
-        """Likely will need to override for any more complicated media objects"""
+        """Likely will need to override for any more complicated media objects."""
         return (
             isinstance(other, self.__class__)
             and hasattr(self, "_sha256")
@@ -272,11 +331,10 @@ class Media(WBValue):
 
 
 class BatchableMedia(Media):
-    """Parent class for Media we treat specially in batches, like images and
-    thumbnails.
+    """Media that is treated in batches.
 
-    Apart from images, we just use these batches to help organize files by name
-    in the media directory.
+    E.g. images and thumbnails. Apart from images, we just use these batches to help
+    organize files by name in the media directory.
     """
 
     def __init__(self) -> None:
@@ -294,7 +352,7 @@ class BatchableMedia(Media):
 
 
 def _numpy_arrays_to_lists(
-    payload: Union[dict, Sequence, "np.ndarray"]
+    payload: Union[dict, Sequence, "np.ndarray"],
 ) -> Union[Sequence, dict, str, int, float, bool]:
     # Casts all numpy arrays to lists so we don't convert them to histograms, primarily for Plotly
 
@@ -315,4 +373,4 @@ def _numpy_arrays_to_lists(
     # Protects against logging non serializable objects
     elif isinstance(payload, Media):
         return str(payload.__class__.__name__)
-    return payload
+    return payload  # type: ignore

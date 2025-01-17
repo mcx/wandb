@@ -7,16 +7,16 @@ from typing import TYPE_CHECKING, Any, List, Optional
 
 from wandb.proto import wandb_server_pb2 as spb
 
-from . import tracelog
-
 if TYPE_CHECKING:
     from wandb.proto import wandb_internal_pb2 as pb
 
 
 class SockClientClosedError(Exception):
-    """Socket has been closed"""
+    """Raised on operations on a closed socket."""
 
-    pass
+
+class SockClientTimeoutError(Exception):
+    """Raised if the server didn't respond before the timeout."""
 
 
 class SockBuffer:
@@ -120,7 +120,7 @@ class SockClient:
 
     def _sendall_with_error_handle(self, data: bytes) -> None:
         # This is a helper function for sending data in a retry fashion.
-        # Similar to the sendall() function in the socket module, but with a
+        # Similar to the sendall() function in the socket module, but with
         # an error handling in case of timeout.
         total_sent = 0
         total_data = len(data)
@@ -143,7 +143,6 @@ class SockClient:
                     time.sleep(self._retry_delay - delta_time)
 
     def _send_message(self, msg: Any) -> None:
-        tracelog.log_message_send(msg, self._sockid)
         raw_size = msg.ByteSize()
         data = msg.SerializeToString()
         assert len(data) == raw_size, "invalid serialization"
@@ -159,7 +158,7 @@ class SockClient:
             self._send_message(msg)
         except BrokenPipeError:
             # TODO(jhr): user thread might no longer be around to receive responses to
-            # things like network status poll loop, there might be a better way to quiesce
+            #  things like network status poll loop, there might be a better way to quiesce
             pass
 
     def send_and_recv(
@@ -182,8 +181,10 @@ class SockClient:
         # it should be relatively stable.
         # This pass would be solved as part of the fix in https://wandb.atlassian.net/browse/WB-8709
         response = self.read_server_response(timeout=1)
+
         if response is None:
-            raise Exception("No response")
+            raise SockClientTimeoutError("No response after 1 second.")
+
         return response
 
     def send(
@@ -276,7 +277,6 @@ class SockClient:
             return None
         rec = spb.ServerRequest()
         rec.ParseFromString(data)
-        tracelog.log_message_recv(rec, self._sockid)
         return rec
 
     def read_server_response(
@@ -287,5 +287,4 @@ class SockClient:
             return None
         rec = spb.ServerResponse()
         rec.ParseFromString(data)
-        tracelog.log_message_recv(rec, self._sockid)
         return rec

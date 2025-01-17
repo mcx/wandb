@@ -1,23 +1,39 @@
 #
 import json
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, Union
 
 from wandb.proto import wandb_internal_pb2 as pb
 
 if TYPE_CHECKING:  # pragma: no cover
-    from google.protobuf.internal.containers import (
-        MessageMap,
-        RepeatedCompositeFieldContainer,
-    )
+    from google.protobuf.internal.containers import RepeatedCompositeFieldContainer
     from google.protobuf.message import Message
 
-    from wandb.proto import wandb_server_pb2 as spb
     from wandb.proto import wandb_telemetry_pb2 as tpb
 
 
 def dict_from_proto_list(obj_list: "RepeatedCompositeFieldContainer") -> Dict[str, Any]:
-    return {item.key: json.loads(item.value_json) for item in obj_list}
+    result: Dict[str, Any] = {}
+
+    for item in obj_list:
+        # Start from the root of the result dict
+        current_level = result
+
+        if len(item.nested_key) > 0:
+            keys = list(item.nested_key)
+        else:
+            keys = [item.key]
+
+        for key in keys[:-1]:
+            if key not in current_level:
+                current_level[key] = {}
+            # Move the reference deeper into the nested dictionary
+            current_level = current_level[key]
+
+        # Set the value at the final key location, parsing JSON from the value_json field
+        final_key = keys[-1]
+        current_level[final_key] = json.loads(item.value_json)
+
+    return result
 
 
 def _result_from_record(record: "pb.Record") -> "pb.Result":
@@ -34,7 +50,7 @@ def _assign_end_offset(record: "pb.Record", end_offset: int) -> None:
 
 
 def proto_encode_to_dict(
-    pb_obj: Union["tpb.TelemetryRecord", "pb.MetricRecord"]
+    pb_obj: Union["tpb.TelemetryRecord", "pb.MetricRecord"],
 ) -> Dict[int, Any]:
     data: Dict[int, Any] = dict()
     fields = pb_obj.ListFields()
@@ -65,39 +81,10 @@ def proto_encode_to_dict(
     return data
 
 
-def settings_dict_from_pbmap(
-    pbmap: "MessageMap[str, spb.SettingsValue]",
-) -> Dict[str, Any]:
-    d: Dict[str, Any] = dict()
-    for k in pbmap:
-        v_obj = pbmap[k]
-        v_type = v_obj.WhichOneof("value_type")
-        v: Union[int, str, float, None, tuple, datetime] = None
-        if v_type == "int_value":
-            v = v_obj.int_value
-        elif v_type == "string_value":
-            v = v_obj.string_value
-        elif v_type == "float_value":
-            v = v_obj.float_value
-        elif v_type == "bool_value":
-            v = v_obj.bool_value
-        elif v_type == "null_value":
-            v = None
-        elif v_type == "tuple_value":
-            v = tuple(v_obj.tuple_value.string_values)
-        elif v_type == "timestamp_value":
-            v = datetime.strptime(v_obj.timestamp_value, "%Y%m%d_%H%M%S")
-        d[k] = v
-    return d
-
-
 def message_to_dict(
     message: "Message",
 ) -> Dict[str, Any]:
-    """
-    Converts a protobuf message into a dictionary.
-    """
-
+    """Convert a protobuf message into a dictionary."""
     from google.protobuf.json_format import MessageToDict
 
     return MessageToDict(message, preserving_proto_field_name=True)

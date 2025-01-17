@@ -7,8 +7,10 @@ from urllib import parse
 
 import wandb
 from wandb import util
-from wandb.sdk.lib import runid
+from wandb.sdk.lib import hashutil, runid
+from wandb.sdk.lib.paths import LogicalPath
 
+from . import _dtypes
 from ._private import MEDIA_TMP
 from .base_types.media import BatchableMedia, Media
 from .helper_types.bounding_boxes_2d import BoundingBoxes2D
@@ -17,13 +19,12 @@ from .helper_types.image_mask import ImageMask
 
 if TYPE_CHECKING:  # pragma: no cover
     import matplotlib  # type: ignore
-    import numpy as np  # type: ignore
+    import numpy as np
     import torch  # type: ignore
     from PIL.Image import Image as PILImage
 
-    from wandb.apis.public import Artifact as PublicArtifact
+    from wandb.sdk.artifacts.artifact import Artifact
 
-    from ..wandb_artifacts import Artifact as LocalArtifact
     from ..wandb_run import Run as LocalRun
 
     ImageDataType = Union[
@@ -34,13 +35,16 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 def _server_accepts_image_filenames() -> bool:
-    from pkg_resources import parse_version
+    if util._is_offline():
+        return True
 
     # Newer versions of wandb accept large image filenames arrays
     # but older versions would have issues with this.
     max_cli_version = util._get_max_cli_version()
     if max_cli_version is None:
         return False
+    from wandb.util import parse_version
+
     accepts_image_filenames: bool = parse_version("0.12.10") <= parse_version(
         max_cli_version
     )
@@ -48,7 +52,7 @@ def _server_accepts_image_filenames() -> bool:
 
 
 def _server_accepts_artifact_path() -> bool:
-    from pkg_resources import parse_version
+    from wandb.util import parse_version
 
     target_version = "0.12.14"
     max_cli_version = util._get_max_cli_version() if not util._is_offline() else None
@@ -61,47 +65,61 @@ def _server_accepts_artifact_path() -> bool:
 class Image(BatchableMedia):
     """Format images for logging to W&B.
 
-    Arguments:
+    Args:
         data_or_path: (numpy array, string, io) Accepts numpy array of
             image data, or a PIL image. The class attempts to infer
             the data format and converts it.
         mode: (string) The PIL mode for an image. Most common are "L", "RGB",
-            "RGBA". Full explanation at https://pillow.readthedocs.io/en/4.2.x/handbook/concepts.html#concept-modes.
+            "RGBA". Full explanation at https://pillow.readthedocs.io/en/stable/handbook/concepts.html#modes
         caption: (string) Label for display of image.
 
     Note : When logging a `torch.Tensor` as a `wandb.Image`, images are normalized. If you do not want to normalize your images, please convert your tensors to a PIL Image.
 
     Examples:
         ### Create a wandb.Image from a numpy array
-        <!--yeadoc-test:log-image-numpy-->
         ```python
         import numpy as np
         import wandb
 
-        wandb.init()
-        examples = []
-        for i in range(3):
-            pixels = np.random.randint(low=0, high=256, size=(100, 100, 3))
-            image = wandb.Image(pixels, caption=f"random field {i}")
-            examples.append(image)
-        wandb.log({"examples": examples})
+        with wandb.init() as run:
+            examples = []
+            for i in range(3):
+                pixels = np.random.randint(low=0, high=256, size=(100, 100, 3))
+                image = wandb.Image(pixels, caption=f"random field {i}")
+                examples.append(image)
+            run.log({"examples": examples})
         ```
 
         ### Create a wandb.Image from a PILImage
-        <!--yeadoc-test:log-image-pillow-->
         ```python
         import numpy as np
         from PIL import Image as PILImage
         import wandb
 
-        wandb.init()
-        examples = []
-        for i in range(3):
-            pixels = np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8)
-            pil_image = PILImage.fromarray(pixels, mode="RGB")
-            image = wandb.Image(pil_image, caption=f"random field {i}")
-            examples.append(image)
-        wandb.log({"examples": examples})
+        with wandb.init() as run:
+            examples = []
+            for i in range(3):
+                pixels = np.random.randint(
+                    low=0, high=256, size=(100, 100, 3), dtype=np.uint8
+                )
+                pil_image = PILImage.fromarray(pixels, mode="RGB")
+                image = wandb.Image(pil_image, caption=f"random field {i}")
+                examples.append(image)
+            run.log({"examples": examples})
+        ```
+
+        ### log .jpg rather than .png (default)
+        ```python
+        import numpy as np
+        import wandb
+
+        with wandb.init() as run:
+            examples = []
+            for i in range(3):
+                pixels = np.random.randint(low=0, high=256, size=(100, 100, 3))
+                image = wandb.Image(pixels, caption=f"random field {i}", file_type="jpg")
+                examples.append(image)
+            run.log({"examples": examples})
         ```
     """
 
@@ -121,6 +139,7 @@ class Image(BatchableMedia):
     _classes: Optional["Classes"]
     _boxes: Optional[Dict[str, "BoundingBoxes2D"]]
     _masks: Optional[Dict[str, "ImageMask"]]
+    _file_type: Optional[str]
 
     def __init__(
         self,
@@ -131,6 +150,7 @@ class Image(BatchableMedia):
         classes: Optional[Union["Classes", Sequence[dict]]] = None,
         boxes: Optional[Union[Dict[str, "BoundingBoxes2D"], Dict[str, dict]]] = None,
         masks: Optional[Union[Dict[str, "ImageMask"], Dict[str, dict]]] = None,
+        file_type: Optional[str] = None,
     ) -> None:
         super().__init__()
         # TODO: We should remove grouping, it's a terrible name and I don't
@@ -144,9 +164,10 @@ class Image(BatchableMedia):
         self._classes = None
         self._boxes = None
         self._masks = None
+        self._file_type = None
 
         # Allows the user to pass an Image object as the first parameter and have a perfect copy,
-        # only overriding additional metdata passed in. If this pattern is compelling, we can generalize.
+        # only overriding additional metadata passed in. If this pattern is compelling, we can generalize.
         if isinstance(data_or_path, Image):
             self._initialize_from_wbimage(data_or_path)
         elif isinstance(data_or_path, str):
@@ -155,9 +176,10 @@ class Image(BatchableMedia):
             else:
                 self._initialize_from_path(data_or_path)
         else:
-            self._initialize_from_data(data_or_path, mode)
-
-        self._set_initialization_meta(grouping, caption, classes, boxes, masks)
+            self._initialize_from_data(data_or_path, mode, file_type)
+        self._set_initialization_meta(
+            grouping, caption, classes, boxes, masks, file_type
+        )
 
     def _set_initialization_meta(
         self,
@@ -166,6 +188,7 @@ class Image(BatchableMedia):
         classes: Optional[Union["Classes", Sequence[dict]]] = None,
         boxes: Optional[Union[Dict[str, "BoundingBoxes2D"], Dict[str, dict]]] = None,
         masks: Optional[Union[Dict[str, "ImageMask"], Dict[str, dict]]] = None,
+        file_type: Optional[str] = None,
     ) -> None:
         if grouping is not None:
             self._grouping = grouping
@@ -236,6 +259,7 @@ class Image(BatchableMedia):
         self._sha256 = wbimage._sha256
         self._size = wbimage._size
         self.format = wbimage.format
+        self._file_type = wbimage._file_type
         self._artifact_source = wbimage._artifact_source
         self._artifact_target = wbimage._artifact_target
 
@@ -267,6 +291,7 @@ class Image(BatchableMedia):
         self,
         data: "ImageDataType",
         mode: Optional[str] = None,
+        file_type: Optional[str] = None,
     ) -> None:
         pil_image = util.get_module(
             "PIL.Image",
@@ -274,8 +299,8 @@ class Image(BatchableMedia):
         )
         if util.is_matplotlib_typename(util.get_full_typename(data)):
             buf = BytesIO()
-            util.ensure_matplotlib_figure(data).savefig(buf)
-            self._image = pil_image.open(buf)
+            util.ensure_matplotlib_figure(data).savefig(buf, format="png")
+            self._image = pil_image.open(buf, formats=["PNG"])
         elif isinstance(data, pil_image.Image):
             self._image = data
         elif util.is_pytorch_tensor_typename(util.get_full_typename(data)):
@@ -284,6 +309,8 @@ class Image(BatchableMedia):
             )
             if hasattr(data, "requires_grad") and data.requires_grad:
                 data = data.detach()  # type: ignore
+            if hasattr(data, "dtype") and str(data.dtype) == "torch.uint8":
+                data = data.to(float)
             data = vis_util.make_grid(data, normalize=True)
             self._image = pil_image.fromarray(
                 data.mul(255).clamp(0, 255).byte().permute(1, 2, 0).cpu().numpy()
@@ -296,20 +323,28 @@ class Image(BatchableMedia):
             self._image = pil_image.fromarray(
                 self.to_uint8(data), mode=mode or self.guess_mode(data)
             )
-
-        tmp_path = os.path.join(MEDIA_TMP.name, runid.generate_id() + ".png")
-        self.format = "png"
+        accepted_formats = ["png", "jpg", "jpeg", "bmp"]
+        if file_type is None:
+            self.format = "png"
+        else:
+            self.format = file_type
+        assert (
+            self.format in accepted_formats
+        ), f"file_type must be one of {accepted_formats}"
+        tmp_path = os.path.join(MEDIA_TMP.name, runid.generate_id() + "." + self.format)
         assert self._image is not None
         self._image.save(tmp_path, transparency=None)
         self._set_file(tmp_path, is_tmp=True)
 
     @classmethod
     def from_json(
-        cls: Type["Image"], json_obj: dict, source_artifact: "PublicArtifact"
+        cls: Type["Image"], json_obj: dict, source_artifact: "Artifact"
     ) -> "Image":
-        classes = None
+        classes: Optional[Classes] = None
         if json_obj.get("classes") is not None:
-            classes = source_artifact.get(json_obj["classes"]["path"])
+            value = source_artifact.get(json_obj["classes"]["path"])
+            assert isinstance(value, (type(None), Classes))
+            classes = value
 
         masks = json_obj.get("masks")
         _masks: Optional[Dict[str, ImageMask]] = None
@@ -329,7 +364,7 @@ class Image(BatchableMedia):
                 _boxes[key]._key = key
 
         return cls(
-            source_artifact.get_path(json_obj["path"]).download(),
+            source_artifact.get_entry(json_obj["path"]).download(),
             caption=json_obj.get("caption"),
             grouping=json_obj.get("grouping"),
             classes=classes,
@@ -382,7 +417,9 @@ class Image(BatchableMedia):
                     run, key, step, id_, ignore_copy_err=ignore_copy_err
                 )
 
-    def to_json(self, run_or_artifact: Union["LocalRun", "LocalArtifact"]) -> dict:
+    def to_json(self, run_or_artifact: Union["LocalRun", "Artifact"]) -> dict:
+        from wandb.sdk.wandb_run import Run
+
         json_dict = super().to_json(run_or_artifact)
         json_dict["_type"] = Image._log_type
         json_dict["format"] = self.format
@@ -396,7 +433,7 @@ class Image(BatchableMedia):
         if self._caption:
             json_dict["caption"] = self._caption
 
-        if isinstance(run_or_artifact, wandb.wandb_sdk.wandb_artifacts.Artifact):
+        if isinstance(run_or_artifact, wandb.Artifact):
             artifact = run_or_artifact
             if (
                 self._masks is not None or self._boxes is not None
@@ -406,7 +443,7 @@ class Image(BatchableMedia):
                 )
 
             if self._classes is not None:
-                class_id = hashlib.md5(
+                class_id = hashutil._md5(
                     str(self._classes._class_set).encode("utf-8")
                 ).hexdigest()
                 class_name = os.path.join(
@@ -421,7 +458,7 @@ class Image(BatchableMedia):
                     "digest": classes_entry.digest,
                 }
 
-        elif not isinstance(run_or_artifact, wandb.wandb_sdk.wandb_run.Run):
+        elif not isinstance(run_or_artifact, Run):
             raise ValueError("to_json accepts wandb_run.Run or wandb_artifact.Artifact")
 
         if self._boxes:
@@ -435,9 +472,7 @@ class Image(BatchableMedia):
         return json_dict
 
     def guess_mode(self, data: "np.ndarray") -> str:
-        """
-        Guess what type of image the np.array is representing
-        """
+        """Guess what type of image the np.array is representing."""
         # TODO: do we want to support dimensions being at the beginning of the array?
         if data.ndim == 2:
             return "L"
@@ -447,14 +482,15 @@ class Image(BatchableMedia):
             return "RGBA"
         else:
             raise ValueError(
-                "Un-supported shape for image conversion %s" % list(data.shape)
+                "Un-supported shape for image conversion {}".format(list(data.shape))
             )
 
     @classmethod
     def to_uint8(cls, data: "np.ndarray") -> "np.ndarray":
-        """
-        Converts floating point image on the range [0,1] and integer images
-        on the range [0,255] to uint8, clipping if necessary.
+        """Convert image data to uint8.
+
+        Convert floating point image on the range [0,1] and integer images on the range
+        [0,255] to uint8, clipping if necessary.
         """
         np = util.get_module(
             "numpy",
@@ -482,9 +518,7 @@ class Image(BatchableMedia):
         key: str,
         step: Union[int, str],
     ) -> dict:
-        """
-        Combines a list of images into a meta dictionary object describing the child images.
-        """
+        """Combine a list of images into a meta dictionary object describing the child images."""
         if TYPE_CHECKING:
             seq = cast(Sequence["Image"], seq)
 
@@ -493,7 +527,7 @@ class Image(BatchableMedia):
         media_dir = cls.get_media_subdir()
 
         for obj in jsons:
-            expected = util.to_forward_slash_path(media_dir)
+            expected = LogicalPath(media_dir)
             if "path" in obj and not obj["path"].startswith(expected):
                 raise ValueError(
                     "Files in an array of Image's must be in the {} directory, not {}".format(
@@ -528,7 +562,7 @@ class Image(BatchableMedia):
             ]
         else:
             wandb.termwarn(
-                "Unable to log image array filenames. In some cases, this can prevent images from being"
+                "Unable to log image array filenames. In some cases, this can prevent images from being "
                 "viewed in the UI. Please upgrade your wandb server",
                 repeat=False,
             )
@@ -653,3 +687,158 @@ class Image(BatchableMedia):
                 self._image = pil_image.open(self._path)
                 self._image.load()
         return self._image
+
+
+# Custom dtypes for typing system
+class _ImageFileType(_dtypes.Type):
+    name = "image-file"
+    legacy_names = ["wandb.Image"]
+    types = [Image]
+
+    def __init__(
+        self,
+        box_layers=None,
+        box_score_keys=None,
+        mask_layers=None,
+        class_map=None,
+        **kwargs,
+    ):
+        box_layers = box_layers or {}
+        box_score_keys = box_score_keys or []
+        mask_layers = mask_layers or {}
+        class_map = class_map or {}
+
+        if isinstance(box_layers, _dtypes.ConstType):
+            box_layers = box_layers._params["val"]
+        if not isinstance(box_layers, dict):
+            raise TypeError("box_layers must be a dict")
+        else:
+            box_layers = _dtypes.ConstType(
+                {layer_key: set(box_layers[layer_key]) for layer_key in box_layers}
+            )
+
+        if isinstance(mask_layers, _dtypes.ConstType):
+            mask_layers = mask_layers._params["val"]
+        if not isinstance(mask_layers, dict):
+            raise TypeError("mask_layers must be a dict")
+        else:
+            mask_layers = _dtypes.ConstType(
+                {layer_key: set(mask_layers[layer_key]) for layer_key in mask_layers}
+            )
+
+        if isinstance(box_score_keys, _dtypes.ConstType):
+            box_score_keys = box_score_keys._params["val"]
+        if not isinstance(box_score_keys, list) and not isinstance(box_score_keys, set):
+            raise TypeError("box_score_keys must be a list or a set")
+        else:
+            box_score_keys = _dtypes.ConstType(set(box_score_keys))
+
+        if isinstance(class_map, _dtypes.ConstType):
+            class_map = class_map._params["val"]
+        if not isinstance(class_map, dict):
+            raise TypeError("class_map must be a dict")
+        else:
+            class_map = _dtypes.ConstType(class_map)
+
+        self.params.update(
+            {
+                "box_layers": box_layers,
+                "box_score_keys": box_score_keys,
+                "mask_layers": mask_layers,
+                "class_map": class_map,
+            }
+        )
+
+    def assign_type(self, wb_type=None):
+        if isinstance(wb_type, _ImageFileType):
+            box_layers_self = self.params["box_layers"].params["val"] or {}
+            box_score_keys_self = self.params["box_score_keys"].params["val"] or []
+            mask_layers_self = self.params["mask_layers"].params["val"] or {}
+            class_map_self = self.params["class_map"].params["val"] or {}
+
+            box_layers_other = wb_type.params["box_layers"].params["val"] or {}
+            box_score_keys_other = wb_type.params["box_score_keys"].params["val"] or []
+            mask_layers_other = wb_type.params["mask_layers"].params["val"] or {}
+            class_map_other = wb_type.params["class_map"].params["val"] or {}
+
+            # Merge the class_ids from each set of box_layers
+            box_layers = {
+                str(key): set(
+                    list(box_layers_self.get(key, []))
+                    + list(box_layers_other.get(key, []))
+                )
+                for key in set(
+                    list(box_layers_self.keys()) + list(box_layers_other.keys())
+                )
+            }
+
+            # Merge the class_ids from each set of mask_layers
+            mask_layers = {
+                str(key): set(
+                    list(mask_layers_self.get(key, []))
+                    + list(mask_layers_other.get(key, []))
+                )
+                for key in set(
+                    list(mask_layers_self.keys()) + list(mask_layers_other.keys())
+                )
+            }
+
+            # Merge the box score keys
+            box_score_keys = set(list(box_score_keys_self) + list(box_score_keys_other))
+
+            # Merge the class_map
+            class_map = {
+                str(key): class_map_self.get(key, class_map_other.get(key, None))
+                for key in set(
+                    list(class_map_self.keys()) + list(class_map_other.keys())
+                )
+            }
+
+            return _ImageFileType(box_layers, box_score_keys, mask_layers, class_map)
+
+        return _dtypes.InvalidType()
+
+    @classmethod
+    def from_obj(cls, py_obj):
+        if not isinstance(py_obj, Image):
+            raise TypeError("py_obj must be a wandb.Image")
+        else:
+            if hasattr(py_obj, "_boxes") and py_obj._boxes:
+                box_layers = {
+                    str(key): set(py_obj._boxes[key]._class_labels.keys())
+                    for key in py_obj._boxes.keys()
+                }
+                box_score_keys = {
+                    key
+                    for val in py_obj._boxes.values()
+                    for box in val._val
+                    for key in box.get("scores", {}).keys()
+                }
+
+            else:
+                box_layers = {}
+                box_score_keys = set()
+
+            if hasattr(py_obj, "_masks") and py_obj._masks:
+                mask_layers = {
+                    str(key): set(
+                        py_obj._masks[key]._val["class_labels"].keys()
+                        if hasattr(py_obj._masks[key], "_val")
+                        else []
+                    )
+                    for key in py_obj._masks.keys()
+                }
+            else:
+                mask_layers = {}
+
+            if hasattr(py_obj, "_classes") and py_obj._classes:
+                class_set = {
+                    str(item["id"]): item["name"] for item in py_obj._classes._class_set
+                }
+            else:
+                class_set = {}
+
+            return cls(box_layers, box_score_keys, mask_layers, class_set)
+
+
+_dtypes.TypeRegistry.add(_ImageFileType)

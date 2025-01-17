@@ -3,6 +3,7 @@ import os
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Type, Union
 
+import wandb
 from wandb import util
 from wandb.sdk.lib import filesystem, runid
 
@@ -13,9 +14,10 @@ from .base_types.media import BatchableMedia
 if TYPE_CHECKING:  # pragma: no cover
     from typing import TextIO
 
-    import numpy as np  # type: ignore
+    import numpy as np
 
-    from ..wandb_artifacts import Artifact as LocalArtifact
+    from wandb.sdk.artifacts.artifact import Artifact
+
     from ..wandb_run import Run as LocalRun
 
 
@@ -23,7 +25,7 @@ if TYPE_CHECKING:  # pragma: no cover
 # https://github.com/wandb/wandb/issues/3472
 #
 # Essentially, the issue is that moviepy's write_gif function fails to close
-# the open write / file descripter returned from `imageio.save`. The following
+# the open write / file descriptor returned from `imageio.save`. The following
 # function is a simplified copy of the function in the moviepy source code.
 # See https://github.com/Zulko/moviepy/blob/7e3e8bb1b739eb6d1c0784b0cb2594b587b93b39/moviepy/video/io/gif_writers.py#L428
 #
@@ -33,12 +35,10 @@ def write_gif_with_image_io(
 ) -> None:
     imageio = util.get_module(
         "imageio",
-        required='wandb.Video requires imageio when passing raw data. Install with "pip install imageio"',
+        required='wandb.Video requires imageio when passing raw data. Install with "pip install wandb[media]"',
     )
 
-    writer = imageio.save(
-        filename, duration=1.0 / clip.fps, quantizer=0, palettesize=256, loop=0
-    )
+    writer = imageio.save(filename, fps=clip.fps, quantizer=0, palettesize=256, loop=0)
 
     for frame in clip.iter_frames(fps=fps, dtype="uint8"):
         writer.append_data(frame)
@@ -49,7 +49,7 @@ def write_gif_with_image_io(
 class Video(BatchableMedia):
     """Format a video for logging to W&B.
 
-    Arguments:
+    Args:
         data_or_path: (numpy array, string, io)
             Video can be initialized with a path to a file or an io object.
             The format must be "gif", "mp4", "webm" or "ogg".
@@ -59,7 +59,9 @@ class Video(BatchableMedia):
             Channels should be (time, channel, height, width) or
             (batch, time, channel, height width)
         caption: (string) caption associated with the video for display
-        fps: (int) frames per second for video. Default is 4.
+        fps: (int)
+            The frame rate to use when encoding raw video frames. Default value is 4.
+            This parameter has no effect when data_or_path is a string, or bytes.
         format: (string) format of video, necessary if initializing with path or io object.
 
     Examples:
@@ -85,19 +87,27 @@ class Video(BatchableMedia):
         self,
         data_or_path: Union["np.ndarray", str, "TextIO", "BytesIO"],
         caption: Optional[str] = None,
-        fps: int = 4,
+        fps: Optional[int] = None,
         format: Optional[str] = None,
     ):
         super().__init__()
 
-        self._fps = fps
         self._format = format or "gif"
         self._width = None
         self._height = None
         self._channels = None
         self._caption = caption
         if self._format not in Video.EXTS:
-            raise ValueError("wandb.Video accepts %s formats" % ", ".join(Video.EXTS))
+            raise ValueError(
+                "wandb.Video accepts {} formats".format(", ".join(Video.EXTS))
+            )
+
+        if isinstance(data_or_path, (BytesIO, str)) and fps:
+            msg = (
+                "`fps` argument does not affect the frame rate of the video "
+                "when providing a file path or raw bytes."
+            )
+            wandb.termwarn(msg)
 
         if isinstance(data_or_path, BytesIO):
             filename = os.path.join(
@@ -111,7 +121,7 @@ class Video(BatchableMedia):
             ext = ext[1:].lower()
             if ext not in Video.EXTS:
                 raise ValueError(
-                    "wandb.Video accepts %s formats" % ", ".join(Video.EXTS)
+                    "wandb.Video accepts {} formats".format(", ".join(Video.EXTS))
                 )
             self._set_file(data_or_path, is_tmp=False)
             # ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 data_or_path
@@ -124,18 +134,30 @@ class Video(BatchableMedia):
                 raise ValueError(
                     "wandb.Video accepts a file path or numpy like data as input"
                 )
-            self.encode()
+            fps = fps or 4
+            self.encode(fps=fps)
 
-    def encode(self) -> None:
-        mpy = util.get_module(
-            "moviepy.editor",
-            required='wandb.Video requires moviepy and imageio when passing raw data.  Install with "pip install moviepy imageio"',
-        )
+    def encode(self, fps: int = 4) -> None:
+        # Try to import ImageSequenceClip from the appropriate MoviePy module
+        mpy = None
+        try:
+            # Attempt to load moviepy.editor for MoviePy < 2.0
+            mpy = util.get_module(
+                "moviepy.editor",
+                required='wandb.Video requires moviepy when passing raw data. Install with "pip install wandb[media]"',
+            )
+        except wandb.Error:
+            # Fallback to moviepy for MoviePy >= 2.0
+            mpy = util.get_module(
+                "moviepy",
+                required='wandb.Video requires moviepy when passing raw data. Install with "pip install wandb[media]"',
+            )
+
         tensor = self._prepare_video(self.data)
-        _, self._height, self._width, self._channels = tensor.shape
+        _, self._height, self._width, self._channels = tensor.shape  # type: ignore
 
         # encode sequence of images into gif string
-        clip = mpy.ImageSequenceClip(list(tensor), fps=self._fps)
+        clip = mpy.ImageSequenceClip(list(tensor), fps=fps)
 
         filename = os.path.join(
             MEDIA_TMP.name, runid.generate_id() + "." + self._format
@@ -169,7 +191,7 @@ class Video(BatchableMedia):
     def get_media_subdir(cls: Type["Video"]) -> str:
         return os.path.join("media", "videos")
 
-    def to_json(self, run_or_artifact: Union["LocalRun", "LocalArtifact"]) -> dict:
+    def to_json(self, run_or_artifact: Union["LocalRun", "Artifact"]) -> dict:
         json_dict = super().to_json(run_or_artifact)
         json_dict["_type"] = self._log_type
 
@@ -183,14 +205,14 @@ class Video(BatchableMedia):
         return json_dict
 
     def _prepare_video(self, video: "np.ndarray") -> "np.ndarray":
-        """This logic was mostly taken from tensorboardX"""
+        """This logic was mostly taken from tensorboardX."""
         np = util.get_module(
             "numpy",
             required='wandb.Video requires numpy when passing raw data. To get it, run "pip install numpy".',
         )
         if video.ndim < 4:
             raise ValueError(
-                "Video must be atleast 4 dimensions: time, channels, height, width"
+                "Video must be at least 4 dimensions: time, channels, height, width"
             )
         if video.ndim == 4:
             video = video.reshape(1, *video.shape)
@@ -213,9 +235,9 @@ class Video(BatchableMedia):
         n_rows = 2 ** ((b.bit_length() - 1) // 2)
         n_cols = video.shape[0] // n_rows
 
-        video = np.reshape(video, newshape=(n_rows, n_cols, t, c, h, w))
+        video = video.reshape(n_rows, n_cols, t, c, h, w)
         video = np.transpose(video, axes=(2, 0, 4, 1, 5, 3))
-        video = np.reshape(video, newshape=(t, n_rows * h, n_cols * w, c))
+        video = video.reshape(t, n_rows * h, n_cols * w, c)
         return video
 
     @classmethod

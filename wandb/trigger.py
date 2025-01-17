@@ -1,4 +1,4 @@
-"""Module to facilitate adding hooks to wandb actions
+"""Module to facilitate adding hooks to wandb actions.
 
 Usage:
     import trigger
@@ -6,6 +6,7 @@ Usage:
     trigger.call('on_something', *args, **kwargs)
     trigger.unregister('on_something', func)
 """
+
 from typing import Any, Callable
 
 _triggers = {}
